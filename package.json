@@ -1,0 +1,81 @@
+{
+  "name": "@wocwang/cortico-world-singer-for-coopanion",
+  "version": "0.1.9",
+  "type": "module",
+  "description": "Cortico World for Coopanion: sing from lyrics with DiffSinger (Qixuan voicebank) and an optional RVC pass",
+  "author": "wocwang",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wocwang/cortico-world-singer-for-coopanion.git"
+  },
+  "homepage": "https://github.com/wocwang/cortico-world-singer-for-coopanion#readme",
+  "bugs": {
+    "url": "https://github.com/wocwang/cortico-world-singer-for-coopanion/issues"
+  },
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "coopanion",
+    "diffsinger",
+    "singing",
+    "vocal-synthesis"
+  ],
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.5.0",
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "DiffSinger唱歌-绮萱",
+    "locales": {
+      "zh": {
+        "displayName": "DiffSinger唱歌-绮萱",
+        "description": "输入一行歌词，用 DiffSinger 自动配旋律唱出来：中文写汉字，换日语声库后写假名也能唱。声库可以放好几个，设置里按「名称 · 语言 · 音色」挑，Normal / Soft 这类音色也能单独切。不装 gpt-sovits 也能单独用：缺共享运行时会自己下一份 CPU 档（约 1 GB，三个插件共用）。全程本机推理，不联网、不训练。唱歌只占约 1.3 GB 内存、不占显存。可选接 RVC 把干声换成小肥鱼/星落落大肥鱼的音色（indexRate / protect 可调）。另开一个只监听本机的 HTTP 接口（默认 127.0.0.1:9882），其他插件与外部大模型可以用 POST /sing 直接拿 wav。"
+      },
+      "en": {
+        "displayName": "DiffSinger Singing - Qixuan",
+        "description": "Type a line of lyrics and hear it sung by DiffSinger with an auto-generated melody. Chinese lyrics use Han characters; with a Japanese voicebank, kana lyrics are sung too. Keep several voicebanks in one folder and pick one in the settings (label shows name, languages and colours), with a separate switch for colours such as Normal / Soft. Works without the gpt-sovits plugin: if the shared runtime is missing it downloads the CPU tier (~1 GB, shared by all three plugins). All inference runs locally, no training. Optionally route the dry vocal through RVC. Also serves a loopback-only HTTP endpoint (127.0.0.1:9882 by default) so other plugins and online LLMs can POST /sing and get a wav back."
+      }
+    },
+    "tags": [
+      "voice",
+      "singing",
+      "local",
+      "experimental"
+    ],
+    "webUiClient": "dist/webui.js",
+    "webUiStyle": "dist/webui.css",
+    "describe": "describe.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "prompts",
+    "README.md",
+    "LICENSE",
+    "describe.json"
+  ],
+  "scripts": {
+    "build": "node scripts/build-webui.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm test && npm run typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "cortico": "^0.2.3",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
