@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -62,6 +62,7 @@ function makeFake(): Fake {
 
 function makeWorld(device?: SingerConfigSection['device'], autoStart?: boolean): {
   cfg: SingerConfigSection;
+  dataDir: string;
   fake: Fake;
   inits: EngineInit[];
   world: SingerWorld;
@@ -88,7 +89,7 @@ function makeWorld(device?: SingerConfigSection['device'], autoStart?: boolean):
   worlds.push(world);
   const invoke = (method: string, args: unknown[] = []): Promise<unknown> =>
     world.webUi('zh').invoke!('service', method, args);
-  return { cfg, fake, inits, world, invoke };
+  return { cfg, dataDir, fake, inits, world, invoke };
 }
 
 /** bootEngine 是后台起的：等一个宏任务让它把假引擎拉到 ready。 */
@@ -149,6 +150,46 @@ describe('推理服务手动启停', () => {
     await invoke('start');
     await nextTick();
     expect(fake.starts).toBe(1);
+  });
+
+  it('卸载声库：删掉目录，清单归零', async () => {
+    const { cfg, world, fake, invoke } = makeWorld();
+    await world.start({ log } as unknown as WorldHost);
+    await nextTick();
+    const before = (await invoke('state')) as State & {
+      models: { voicebank: { bytes: number; ready: boolean }; reclaimable: number };
+    };
+    expect(before.models.voicebank.ready).toBe(true);
+
+    const after = (await invoke('remove', [{ target: 'voicebank' }])) as typeof before;
+    expect(after.models.voicebank.bytes).toBe(0);
+    expect(after.models.voicebank.ready).toBe(false);
+    expect(existsSync(cfg.voicebankDir)).toBe(false);
+    // 卸载前先停引擎：假引擎记一次 stop。
+    expect(fake.stops).toBe(1);
+  });
+
+  it('卸载派生 venv：认 pyvenv.cfg，删完状态归零', async () => {
+    const { dataDir, world, invoke } = makeWorld();
+    const root = join(dataDir, 'venv');
+    mkdirSync(join(root, 'Scripts'), { recursive: true });
+    writeFileSync(join(root, 'pyvenv.cfg'), 'home = test\n');
+    writeFileSync(join(root, 'Scripts', 'python.exe'), '');
+    await world.start({ log } as unknown as WorldHost);
+    await nextTick();
+
+    const out = (await invoke('remove', [{ target: 'venv' }])) as { models: { venv: { bytes: number } } };
+    expect(out.models.venv.bytes).toBe(0);
+    expect(existsSync(root)).toBe(false);
+  });
+
+  it('卸载不认识的目录会被拒绝', async () => {
+    const { cfg, world, invoke } = makeWorld();
+    await world.start({ log } as unknown as WorldHost);
+    // 声库目录里没有 dsconfig.yaml：不删。
+    rmSync(join(cfg.voicebankDir, 'dsconfig.yaml'), { force: true });
+    const out = (await invoke('remove', [{ target: 'voicebank' }])) as { error?: string };
+    expect(out.error).toContain('dsconfig.yaml');
   });
 
   it('关掉「随 Coopanion 启动」后挂载不拉服务，手动启动仍可用', async () => {

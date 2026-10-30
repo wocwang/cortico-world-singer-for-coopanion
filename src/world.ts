@@ -8,8 +8,8 @@
  * 工具 `singer_sing` 给桌宠 / 对话页用：合成完把 PCM 写进本机声卡才回执；提示词要求先调它、
  * 紧接着 `pet_say`，气泡与声音同时开始（见 Pal-AI-Lab/Coopanion#538）。QQ 点歌仍走 qq_send + voice=true。
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { Language } from 'cortico/core/language.ts';
@@ -37,7 +37,7 @@ import { VOCODER_PAGE, VOICEBANK_PAGE, VOICEBANK_VERSION } from './catalog.ts';
 const WORKER_SCRIPT = fileURLToPath(new URL('./python/worker.py', import.meta.url));
 /** 告诉模型「在哪唱歌、怎么点歌」的环境提示词模板。 */
 const ENV_PROMPT_PATH = fileURLToPath(new URL('../prompts/env.md', import.meta.url));
-const VERSION = '0.1.15';
+const VERSION = '0.1.16';
 /** `singer_sing` 等这一句唱进声卡的上限：DiffSinger 是整句批式合成（实测 0.5–11 秒），留足余量。 */
 const SING_ALOUD_MAX_MS = 60_000;
 /** 换声库时最多等旧引擎把排队的句子唱完（超时也照样切，别把用户卡死）。 */
@@ -65,6 +65,26 @@ export interface EngineInit {
 /** 这套运行时带不带 CUDA / cuDNN：torch/lib 里有 cuDNN 9 的 DLL 才算显卡档。 */
 function runtimeHasCuda(dir: string): boolean {
   return dir !== '' && existsSync(join(dir, 'runtime', 'Lib', 'site-packages', 'torch', 'lib', 'cudnn64_9.dll'));
+}
+
+/** 递归统计目录占用；不跟符号链接（venv 里有 junction，跟进去会绕圈）。 */
+function dirBytes(dir: string): number {
+  let total = 0;
+  const walk = (path: string): void => {
+    let names: string[];
+    try { names = readdirSync(path); } catch { return; }
+    for (const name of names) {
+      const next = join(path, name);
+      try {
+        const st = lstatSync(next);
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) walk(next);
+        else total += st.size;
+      } catch { /* 被占用 / 无权限：跳过 */ }
+    }
+  };
+  walk(dir);
+  return total;
 }
 
 /** 配置 → 实际使用的声库目录：选了「声库总目录」里的某个库就用它，否则用单独的「声库目录」。 */
@@ -144,6 +164,8 @@ export class SingerWorld implements World {
   private failedBank: { dir: string; detail: string } | null = null;
   /** 演唱串行链：同一时刻只唱一句，换声库也排在这一句唱完之后。 */
   private singChain: Promise<unknown> = Promise.resolve();
+  /** 目录占用缓存：面板每秒拉一次 state，不能每次都去遍历几千个文件。 */
+  private readonly bytesCache = new Map<string, { bytes: number; at: number }>();
   /** 最近一次演唱的结果，面板渲染用。 */
   private lastSing: {
     at: number; ms: number; bytes: number; seconds: number; notes: number;
@@ -638,6 +660,7 @@ export class SingerWorld implements World {
       else if (method === 'stop') await this.stopService();
       return this.status();
     }
+    if (method === 'remove') return this.removeModel(args[0]);
     if (method === 'sing') return this.singFromPanel(args);
     return { error: `unknown method: ${panel}.${method}` };
   }
@@ -692,9 +715,104 @@ export class SingerWorld implements World {
       defaults: { bpm: this.opts.cfg.bpm, keyShift: this.opts.cfg.keyShift, scale: this.opts.cfg.scale },
       rvc: { enabled: this.opts.cfg.rvcEnabled, endpoint: this.opts.cfg.rvcEndpoint, voice: this.opts.cfg.rvcVoice },
       lastSing: this.lastSing,
+      models: this.modelInventory(),
       version: VERSION,
       voicebankPage: VOICEBANK_PAGE,
     };
+  }
+
+  /**
+   * 已安装模型的清单：面板列出来，让用户看到每样占多少、能清多少。
+   * 只有声库、派生 venv 与临时音频属于本插件；共享运行时三个插件共用，只读不删。
+   */
+  private modelInventory(): {
+    voicebank: { path: string; bytes: number; ready: boolean };
+    venv: { path: string; bytes: number; ready: boolean };
+    runtime: { path: string; bytes: number; tier: string | null; shared: boolean };
+    tmp: { path: string; bytes: number };
+    reclaimable: number;
+  } {
+    const voicebankDir = this.voicebankDir;
+    const venvDir = this.venvRootDir();
+    const tmpDir = join(this.opts.dataDir, 'tmp');
+    const voicebankBytes = voicebankDir ? this.cachedBytes(voicebankDir) : 0;
+    const venvBytes = this.cachedBytes(venvDir);
+    const tmpBytes = this.cachedBytes(tmpDir);
+    const runtimeBytes = this.runtimeDir ? this.cachedBytes(this.runtimeDir) : 0;
+    return {
+      voicebank: { path: voicebankDir, bytes: voicebankBytes, ready: !!this.activeBank },
+      venv: { path: venvDir, bytes: venvBytes, ready: this.venv?.state().phase === 'ready' },
+      runtime: {
+        path: this.runtimeDir,
+        bytes: runtimeBytes,
+        tier: this.runtimeTier || null,
+        shared: true,
+      },
+      tmp: { path: tmpDir, bytes: tmpBytes },
+      reclaimable: voicebankBytes + venvBytes + tmpBytes,
+    };
+  }
+
+  /** 派生 venv 根目录：`Scripts/python.exe` 往上两级。 */
+  private venvRootDir(): string {
+    return dirname(dirname(this.pythonPath));
+  }
+
+  private cachedBytes(dir: string): number {
+    const hit = this.bytesCache.get(dir);
+    if (hit && Date.now() - hit.at < 60_000) return hit.bytes;
+    const bytes = dirBytes(dir);
+    this.bytesCache.set(dir, { bytes, at: Date.now() });
+    return bytes;
+  }
+
+  /** 面板点「卸载」：删声库 / 派生 venv / 临时音频；删完返回新状态。 */
+  private async removeModel(raw: unknown): Promise<unknown> {
+    const target = typeof raw === 'string'
+      ? raw
+      : raw && typeof raw === 'object' && typeof (raw as Record<string, unknown>).target === 'string'
+        ? (raw as { target: string }).target
+        : '';
+    if (!['voicebank', 'venv', 'tmp'].includes(target)) return { error: `未知的卸载目标：${target || '空'}` };
+    const busy = this.installer?.status().phase === 'working'
+      || this.venv?.state().phase === 'working'
+      || this.runtime?.status().phase === 'working';
+    if (busy) return { error: '有安装任务正在进行：先取消，再卸载' };
+    // worker 占着 venv 里的 .pyd/.dll 与声库目录，先停掉再删。
+    await this.engine?.stop();
+    try {
+      if (target === 'voicebank') {
+        const dir = this.voicebankDir;
+        if (!dir || !existsSync(dir)) return { error: '声库目录已经是空的' };
+        if (!existsSync(join(dir, 'dsconfig.yaml'))) {
+          return { error: `拒绝卸载：${dir} 里没有 dsconfig.yaml，不像声库目录` };
+        }
+        rmSync(dir, { recursive: true, force: true });
+        this.activeBank = bankInfo(dir);
+        this.failedBank = null;
+        this.bytesCache.delete(dir);
+        this.log?.info('已卸载声库', { dir });
+      } else if (target === 'venv') {
+        const root = this.venvRootDir();
+        if (!existsSync(join(root, 'pyvenv.cfg'))) {
+          return { error: `拒绝卸载：${root} 里没有 pyvenv.cfg，不像派生 venv` };
+        }
+        rmSync(root, { recursive: true, force: true });
+        this.bytesCache.delete(root);
+        this.log?.info('已卸载派生 venv', { dir: root });
+        // venv 状态归零，engine 也换成新的（旧的已停）；面板下一步会提示重新安装。
+        this.setup();
+      } else {
+        const dir = join(this.opts.dataDir, 'tmp');
+        rmSync(dir, { recursive: true, force: true });
+        mkdirSync(dir, { recursive: true });
+        this.bytesCache.delete(dir);
+        this.log?.info('已清理临时音频', { dir });
+      }
+      return this.status();
+    } catch (err) {
+      return { error: `卸载失败：${err instanceof Error ? err.message : String(err)}` };
+    }
   }
 
   /** 面板点「一键安装」：先停引擎，再（缺的话）下共享运行时、建派生 venv、补依赖、下声库，装完自动重拉引擎。 */

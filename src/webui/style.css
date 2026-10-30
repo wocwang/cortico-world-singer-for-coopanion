@@ -8,6 +8,10 @@
 .sn-pill[data-tone="bad"] { color: var(--bad, #c0392b); }
 .sn-detail { font-size: .85em; opacity: .7; overflow-wrap: anywhere; }
 .sn-acts { display: flex; gap: .4em; justify-content: flex-end; }
+.sn-model { display: flex; align-items: center; gap: .6em; font-size: .85em; padding: .15em 0; }
+.sn-model-name { flex: 1; overflow-wrap: anywhere; }
+.sn-model-size { opacity: .7; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sn-model-note { opacity: .55; font-size: .9em; white-space: nowrap; }
 .sn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(9em, 1fr)); gap: .6em; margin: .6em 0; }
 .sn-grid .field, .sn-grid input, .sn-grid select { width: 100%; }
 .sn-log { max-height: 12em; overflow: auto; font-size: .8em; opacity: .8; white-space: pre-wrap; }

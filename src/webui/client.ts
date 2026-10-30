@@ -71,6 +71,14 @@ interface PanelState {
   defaults: { bpm: number; keyShift: number; scale: string };
   rvc: { enabled: boolean; endpoint: string; voice: string };
   lastSing: SingDone | null;
+  /** 已安装模型清单：占多少、能不能卸载。 */
+  models?: {
+    voicebank: { path: string; bytes: number; ready: boolean };
+    venv: { path: string; bytes: number; ready: boolean };
+    runtime: { path: string; bytes: number; tier: string | null; shared: boolean };
+    tmp: { path: string; bytes: number };
+    reclaimable: number;
+  };
 }
 
 type Tone = 'on' | 'off' | 'warn' | 'bad';
@@ -114,11 +122,17 @@ const servicePanel: WebUiPanel = {
     let state: PanelState | null = null;
     let expanded = false;
 
-    const call = async (method: string): Promise<void> => {
+    const call = async (method: string, args: unknown[] = []): Promise<void> => {
       msg.textContent = '';
       msg.classList.remove('bad');
       try {
-        render(await ctx.invoke<PanelState>(method));
+        const out = await ctx.invoke<PanelState & { error?: string }>(method, args);
+        if (out && typeof out === 'object' && 'error' in out && out.error) {
+          msg.textContent = out.error;
+          msg.classList.add('bad');
+          return;
+        }
+        render(out);
       } catch (err) {
         msg.textContent = errText(err);
         msg.classList.add('bad');
@@ -137,7 +151,16 @@ const servicePanel: WebUiPanel = {
 
     const bar = ui.progress({ tone: 'warn' });
     bar.el.hidden = true;
-    sheet.append(bar.el, ui.h('div', 'sn-detail', t.notice));
+    // 已安装模型：每样占多少、能清多少；卸载按钮带二次确认。
+    const modelsBox = ui.h('div', 'sn-models');
+    sheet.append(
+      bar.el,
+      ui.h('div', 'sn-detail', t.notice),
+      ui.h('div', 'sn-detail', t.modelsTitle),
+      modelsBox,
+      ui.h('div', 'sn-detail', t.modelsHint),
+    );
+    let modelsKey = '';
 
     const installBtn = ui.button(t.install, { variant: 'primary', size: 'sm', onClick: () => void call('install') });
     const cancelBtn = ui.button(t.cancel, { size: 'sm', onClick: () => void call('cancel') });
@@ -160,6 +183,44 @@ const servicePanel: WebUiPanel = {
     });
 
     ctx.root.append(sheet, acts, logToggle, log, msg);
+
+    const uninstall = async (target: 'voicebank' | 'venv' | 'tmp', name: string, bytes: number): Promise<void> => {
+      if (!(await ui.confirm({ title: t.uninstallConfirm(name, ui.fmt.bytes(bytes)), danger: true }))) return;
+      await call('remove', [{ target }]);
+    };
+
+    function renderModels(s: PanelState, busy: boolean): void {
+      const m = s.models;
+      if (!m) { modelsBox.replaceChildren(); return; }
+      const lines: HTMLElement[] = [];
+      const add = (
+        name: string,
+        item: { path: string; bytes: number },
+        opts: { target?: 'voicebank' | 'venv' | 'tmp'; shared?: boolean },
+      ): void => {
+        const line = ui.h('div', 'sn-model');
+        line.append(ui.h('span', 'sn-model-name', name), ui.h('span', 'sn-model-size', ui.fmt.bytes(item.bytes)));
+        if (opts.shared) {
+          line.append(ui.h('span', 'sn-model-note', t.modelShared));
+        } else if (item.bytes > 0 && opts.target) {
+          const target = opts.target;
+          const btn = ui.button(t.uninstall, {
+            size: 'sm', variant: 'danger', onClick: () => void uninstall(target, name, item.bytes),
+          });
+          btn.disabled = busy;
+          line.append(btn);
+        } else {
+          line.append(ui.h('span', 'sn-model-note', t.modelEmpty));
+        }
+        lines.push(line);
+      };
+      add(t.modelVoicebank, m.voicebank, { target: 'voicebank' });
+      add(t.modelVenv, m.venv, { target: 'venv' });
+      add(t.modelTmp, m.tmp, { target: 'tmp' });
+      if (m.runtime.path) add(t.modelRuntime(m.runtime.tier), m.runtime, { shared: true });
+      lines.push(ui.h('div', 'sn-detail', t.reclaimable(ui.fmt.bytes(m.reclaimable))));
+      modelsBox.replaceChildren(...lines);
+    }
 
     function render(s: PanelState): void {
       state = s;
@@ -227,6 +288,9 @@ const servicePanel: WebUiPanel = {
       // RVC 后处理
       setPill(rvcRow.pill, s.rvc.enabled ? t.ready : t.rvcOff, s.rvc.enabled ? 'on' : 'off');
       rvcRow.detail.textContent = s.rvc.enabled ? t.rvcOn(s.rvc.endpoint, s.rvc.voice) : '';
+      // 模型清单变化（大小 / 是否装好 / 是否在忙）才重建，别每秒重绘按钮。
+      const modelsState = JSON.stringify({ m: s.models ?? null, busy });
+      if (modelsState !== modelsKey) { modelsKey = modelsState; renderModels(s, busy); }
       if (expanded) log.textContent = s.tail.join('\n');
     }
 

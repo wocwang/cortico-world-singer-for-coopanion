@@ -1,6 +1,6 @@
 {
   "name": "@wocwang/cortico-world-singer-for-coopanion",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "type": "module",
   "description": "Cortico World for Coopanion: sing from lyrics with DiffSinger (Qixuan voicebank) and an optional RVC pass",
   "author": "wocwang",
