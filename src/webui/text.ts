@@ -4,7 +4,7 @@ import type { Language } from 'cortico/core/language.ts';
 const TEXT = {
   zh: {
     serviceTitle: '服务',
-    serviceHint: 'DiffSinger 唱歌引擎、派生 venv 与声库的状态；首次使用先点「一键安装」。引擎随插件启动，可在面板手动「停止服务」还内存（约 1.3 GB）、再「启动服务」。占用：纯 CPU 推理，不占显存，引擎载入约 4–11 秒。与 gpt-sovits（说话）、RVC（换音色）配合使用。',
+    serviceHint: 'DiffSinger 唱歌引擎、派生 venv 与声库的状态；首次使用先点「一键安装」。引擎随插件启动，可在面板手动「停止服务」还内存（约 1.3 GB）、再「启动服务」。占用：默认自动——有 NVIDIA 显卡且依赖齐了就用显卡（约 0.8 GB 显存），否则纯 CPU（不占显存）；引擎载入约 2–11 秒。与 gpt-sovits（说话）、RVC（换音色）配合使用。',
     singTitle: '演唱',
     singHint: '输入一句歌词，程序按调式自动配旋律唱出来。中文写汉字，日语写假名，英语按单词（都要先换成带对应词典的声库）；标点断句，其余字符不唱。',
     rowEngine: '引擎',
@@ -13,6 +13,8 @@ const TEXT = {
     rowApi: '接口',
     rowRvc: 'RVC',
     ready: '就绪',
+    deviceGpu: '显卡推理',
+    deviceCpu: 'CPU 推理',
     starting: '启动中',
     stopped: '未启动',
     error: '错误',
@@ -76,7 +78,7 @@ const TEXT = {
   },
   en: {
     serviceTitle: 'Service',
-    serviceHint: 'DiffSinger engine, derived venv and voicebank. Click "Install" on first use. The engine starts with the plugin; use Stop service to release its memory (about 1.3 GB) and Start service to bring it back. Footprint: CPU-only inference, no VRAM, engine load takes 4–11 s. Works together with gpt-sovits (speech) and RVC (timbre).',
+    serviceHint: 'DiffSinger engine, derived venv and voicebank. Click "Install" on first use. The engine starts with the plugin; use Stop service to release its memory (about 1.3 GB) and Start service to bring it back. Footprint: auto by default — the GPU (about 0.8 GB VRAM) when an NVIDIA GPU and its dependencies are ready, otherwise pure CPU (no VRAM); engine load takes 2–11 s. Works together with gpt-sovits (speech) and RVC (timbre).',
     singTitle: 'Sing',
     singHint: 'Type a line of lyrics; the melody is generated in the chosen scale. Chinese uses Han characters, Japanese uses kana, English uses words — each needs a voicebank that ships the matching dictionary. Punctuation splits phrases; other characters are skipped.',
     rowEngine: 'Engine',
@@ -85,6 +87,8 @@ const TEXT = {
     rowApi: 'API',
     rowRvc: 'RVC',
     ready: 'ready',
+    deviceGpu: 'GPU inference',
+    deviceCpu: 'CPU inference',
     starting: 'starting',
     stopped: 'stopped',
     error: 'error',

@@ -2,17 +2,25 @@
 import { join } from 'node:path';
 import { runtimesRoot } from 'cortico/paths.ts';
 import type { Language } from 'cortico/core/language.ts';
-import type { WorldDefinition, WorldDescribe } from 'cortico/world.ts';
+import { describeTools, type WorldDefinition, type WorldDescribe } from 'cortico/world.ts';
 import {
-  BANK_OPTIONS, COLOR_OPTIONS, SCALE_OPTIONS, SINGER_DEFAULTS, SINGER_ID, TIER_OPTIONS,
-  scaleOptions, tierOptions,
+  BANK_OPTIONS, COLOR_OPTIONS, DEVICE_OPTIONS, SCALE_OPTIONS, SINGER_DEFAULTS, SINGER_ID, TIER_OPTIONS,
+  deviceOptions, scaleOptions, tierOptions,
   type SingerConfigSection,
 } from './config.ts';
 import { bankInfo, languageLabel, scanBanks } from './banks.ts';
 import { SingerWorld } from './world.ts';
+import { SINGER_TOOL_DECLS } from './tools.ts';
 
-/** 本 World 不注册工具、不发事件：它只提供 HTTP 接口与面板。 */
-const DESCRIBE: WorldDescribe = { tools: [], events: [] };
+const DESCRIBE: WorldDescribe = {
+  tools: describeTools(SINGER_TOOL_DECLS, {
+    singer_sing: {
+      zh: '在本机把一句歌词唱出来，紧跟 pet_say 调用，气泡与声音同时开始。',
+      en: 'Sings one lyric line on this computer, right before the pet_say that shows the same line, so the bubble appears as the voice begins.',
+    },
+  }),
+  events: [],
+};
 
 /**
  * 最近一次 `create` 的配置与数据目录。
@@ -54,10 +62,11 @@ function colorOptions(language: Language): Array<{ value: string; label: string 
 
 export const SINGER: WorldDefinition<SingerConfigSection> = {
   id: SINGER_ID,
-  label: 'DiffSinger唱歌-绮萱',
+  label: 'DiffSinger唱歌',
   defaults: () => structuredClone(SINGER_DEFAULTS),
   configOptions(kind, language) {
     if (kind === TIER_OPTIONS) return tierOptions(language);
+    if (kind === DEVICE_OPTIONS) return deviceOptions(language);
     if (kind === SCALE_OPTIONS) return scaleOptions(language);
     if (kind === BANK_OPTIONS) return bankOptions(language);
     if (kind === COLOR_OPTIONS) return colorOptions(language);

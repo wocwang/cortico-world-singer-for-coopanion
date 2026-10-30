@@ -4,6 +4,8 @@ Coopanion 的 `kind: world` 插件：**一句中文歌词进，一段 wav 出**�
 
 - 面板「演唱」直接试听、下载 wav；
 - 另开一个只监听 `127.0.0.1` 的 HTTP 接口（默认 `:9882`），其他插件与外部大模型用 **纯 JSON** `POST /sing` 就能拿到音频；
+- 桌宠 / 对话页里 Coo 想唱时，本插件用 `singer_sing` 自己把这一句唱到本机声卡；`pet_say` 气泡与声音同时开始，不用装 gpt-sovits；
+- 推理设备默认自动：显卡档运行时 + `onnxruntime-gpu` 就绪时走 NVIDIA 显卡（约 0.8 GB 显存，热跑约 0.7 秒一句），否则纯 CPU；载入后先热身一句，第一句也不用等；
 - 可选把干声再送进 RVC 插件换音色（默认关闭，RVC 不在线时自动退回绮萱原声）。
 
 ## 链路
@@ -15,14 +17,16 @@ Coopanion 的 `kind: world` 插件：**一句中文歌词进，一段 wav 出**�
      → diffsinger_utau 五段推理（dur → pitch → variance → acoustic → vocoder）→ wav
 ```
 
-常驻 Python worker 只在启动时载入声库的五个 ONNX，之后每首歌只走推理；Node 侧通过 stdin/stdout 各一行 JSON 驱动（见 `src/engine.ts` 顶部协议）。推理走 onnxruntime 的 CPU provider（`diffsinger_utau` 目前不暴露 device 参数），显卡档只影响派生 venv 借用的运行时。
+常驻 Python worker 只在启动时载入声库的五个 ONNX，之后每首歌只走推理；Node 侧通过 stdin/stdout 各一行 JSON 驱动（见 `src/engine.ts` 顶部协议）。推理默认自动挑设备：显卡档运行时的 `torch/lib` 带 CUDA / cuDNN，派生 venv 再补一份 `onnxruntime-gpu`，worker 启动时把 venv 的 site-packages 插到 `sys.path` 最前（盖住共享运行时里的 CPU 版 onnxruntime），五个 ONNX 都挂 CUDA provider（卷积搜索用 HEURISTIC，避开默认 EXHAUSTIVE 首句几十秒的算法搜索）；载入后拿一句短句热身，把首跑开销挪到启动阶段。任何一步缺了（没有 NVIDIA、没有显卡档运行时、没装 GPU 版）都自动退回 CPU provider，不影响唱歌。
 
 ## 前置
 
 - Windows x64，Node ≥ 22；
 - 一套共享 Python 运行时（含 torch / onnxruntime / librosa / ffmpeg）：**优先复用**部署里 `runtimes/gpt-sovits/` 下的任意一档（谁装的都行）；
   没有的话，点面板「安装」会自己下一份 CPU 档（约 1 GB，装到同一位置，和 gpt-sovits / RVC 共用），所以不装 gpt-sovits 插件也能单用。
-- 派生 venv 用 `python -m venv --system-site-packages` 从这套运行时长出来，只补 `diffsinger-utau==0.3.8`，不改共享运行时。
+- 派生 venv 用 `python -m venv --system-site-packages` 从这套运行时长出来，只补 `diffsinger-utau==0.3.8`；
+  「推理档」是显卡档且「推理设备」不是 CPU 时，再补一份 `onnxruntime-gpu==1.22.0`（约 215 MB，先走阿里云镜像），
+  不改共享运行时本身。
 
 ## 首次安装
 
@@ -47,7 +51,7 @@ out/         勾选「保存」时的成品
 
 ## 推理服务手动启停
 
-挂载时会自动拉起推理服务；面板「服务」里也可以手动停掉再启回来：
+默认随 Coopanion 启动拉起推理服务（配置 `autoStart` 可以关掉，关掉后要用时在面板手动启动）；面板「服务」里也可以随时停掉再启回来：
 
 - **停止服务**：只停引擎和本机 HTTP 接口，World 仍挂载，引擎占的约 1.3 GB 内存释放；
 - **启动服务**：按当前配置重新载入（约 4–11 秒），接口跟着回来；
@@ -104,13 +108,14 @@ curl -sS -X POST http://127.0.0.1:9882/sing \
 | --- | --- | --- | --- |
 | **gpt-sovits**（更好的 GPTSovits 语音） | `:9880` | 说话：文字 → 语音，本机外放，或交给 QQ | 显卡档约 2–3 GB 显存（按需加载后 1.5–2.5 GB）；CPU 档约 4–6 GB 内存 |
 | **RVC**（RVC 变声） | `:9881` | 把干声换成小肥鱼 / 星落落大肥鱼的音色 | 显卡档约 1 GB 显存、内存约 2.5 GB（实测）；启动约 25–30 秒 |
-| **本插件**（DiffSinger 唱歌） | `:9882` | 唱歌：歌词 → 绮萱的歌声 | 纯 CPU，内存约 1.3 GB、不占显存（实测）；引擎载入约 7–11 秒 |
+| **本插件**（DiffSinger 唱歌） | `:9882` | 唱歌：歌词 → 绮萱的歌声 | 默认自动：显卡约 0.8 GB 显存、热跑约 0.7 秒/句；CPU 约 1.3 GB 内存、不占显存、约 4.8 秒/句；载入约 2–11 秒（显卡档多一句热身） |
 
 配合方式：
 
 - **说话**走 gpt-sovits；**唱歌**走本插件；
 - 想让歌声也换成你训练的音色，把本插件的「RVC 后处理」打开（`indexRate` / `protect` 可调）；
 - QQ 里点歌是「gpt-sovits 的语音接口收到 `【唱】` → 转给本插件 → 唱好回传」，所以三个插件要同时在运行。
+- 桌宠 / 对话页的唱歌**不再依赖 gpt-sovits**：本插件自己合成、自己写声卡（`singer_sing`）；只有 QQ 点歌仍然要三个插件在运行；
 
 ## 在 QQ 里唱歌
 
@@ -182,7 +187,9 @@ worker 在启动时给每个阶段包了一层，按后缀把 `variance_Soft` �
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `tier` | `auto` | `auto` / `cuda` / `cpu`；决定派生 venv 基于哪一档运行时，改档后点「重启引擎」自动重建 |
+| `autoStart` | true | 随 Coopanion 启动就拉起唱歌引擎与本机接口；关掉后插件仍加载，但服务停着（省内存），要用时在面板点「启动服务」。只在下次启动 Coopanion 时决定初始状态 |
+| `tier` | `auto` | `auto` / `cuda` / `cpu`；决定派生 venv 基于哪一档运行时（CUDA / cuDNN 在显卡档里），改档后点「重启引擎」自动重建 |
+| `device` | `auto` | `auto` / `cuda` / `cpu`；真正用显卡还是 CPU 推理由它决定：`auto` 要显卡档运行时、`onnxruntime-gpu` 与 NVIDIA 都齐了才走 CUDA，缺一样退回 CPU。切到 `cuda` 后第一次「重启引擎」会补装 `onnxruntime-gpu` |
 | `runtimeDir` | 空 | gpt-sovits 运行时目录；空为自动挑部署里最新的 |
 | `pythonPath` | 空 | 派生 venv 的 python.exe；空为数据目录 `venv\Scripts\python.exe` |
 | `voicebankDir` | 空 | 声库目录；空为数据目录 `voicebank` |
@@ -196,7 +203,7 @@ worker 在启动时给每个阶段包了一层，按后缀把 `variance_Soft` �
 | `httpApi` / `httpPort` / `httpToken` | true / 9882 / 空 | 本机接口开关、端口、令牌 |
 
 生效时机：`voicebank` / `voiceColor` 改了下一句就生效（换声库失败会自动退回上一个）；
-`tier` / `runtimeDir` / `pythonPath` / `voicebankDir` / `voicebanksDir` / `httpApi` / `httpPort` / `httpToken`
+`tier` / `device` / `runtimeDir` / `pythonPath` / `voicebankDir` / `voicebanksDir` / `httpApi` / `httpPort` / `httpToken`
 改完在面板点「重启引擎」生效（设置页也会标「重启生效」）。`bpm` / `keyShift` / `scale` 与 RVC 参数每句现读。
 
 ## 开发
@@ -210,6 +217,16 @@ npx tsx scripts/smoke.mts   # 真实链路：起 World → /health → POST /sin
 ```
 
 `scripts/smoke.mts` 可用环境变量覆盖路径：`SINGER_SMOKE_PYTHON`、`SINGER_SMOKE_BANK`、`SINGER_SMOKE_RUNTIME`、`SINGER_SMOKE_LYRICS`。
+
+## 第三方组件
+
+本机播放用随包的 audify 预编译件（`vendor/audify/`），不从 npm 安装、不在安装时下载：
+
+| 组件 | 用途 | 版本 / 来源 | 许可证 |
+| --- | --- | --- | --- |
+| audify | Node ↔ RtAudio 绑定 | 1.10.1 官方 napi-v10 win32-x64 预编译件 | MIT（`vendor/audify/LICENSE`） |
+| RtAudio | 打开系统输出流（Windows 上走 WASAPI） | 随 audify 预编译件附带 | `vendor/audify/LICENSE.rtaudio` |
+| Opus | audify 预编译件的依赖 | 随 audify 预编译件附带 | BSD（`vendor/audify/COPYING.opus`） |
 
 ## 许可与合规
 

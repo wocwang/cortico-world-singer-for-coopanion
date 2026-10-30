@@ -6,6 +6,9 @@ export const SINGER_ID = 'singer';
 /** 推理档：沿用 gpt-sovits 的口径，`auto` 检测 NVIDIA 显卡后优先 CUDA 档运行时。 */
 export type SingerTier = 'auto' | 'cuda' | 'cpu';
 
+/** 推理设备：`auto` 有 NVIDIA 且派生 venv 装好 onnxruntime-gpu 时走显卡，否则 CPU。 */
+export type SingerDevice = 'auto' | 'cpu' | 'cuda';
+
 /** 旋律调式：大调 / 小调。小调更忧郁，大调更亮。 */
 export type SingerScale = 'major' | 'minor';
 
@@ -14,6 +17,10 @@ export interface SingerConfigSection {
   enabled: boolean;
   /** 推理档；DiffSinger 走 onnxruntime，改档影响的是派生 venv 基于哪套运行时。 */
   tier: SingerTier;
+  /** 推理设备；显卡档要配着「推理档」的 cuda 运行时用（CUDA / cuDNN 在那里）。 */
+  device: SingerDevice;
+  /** 随 Coopanion 启动就拉起推理服务（引擎 + 本机接口）；关掉后挂载了也先不启动。 */
+  autoStart: boolean;
   /**
    * 借用 base 解释器（以及 CUDA / cuDNN）的 gpt-sovits 运行时目录（含 `runtime/python.exe`）。
    * 空为在 `<部署根>/runtimes/gpt-sovits/` 下自动挑一个可用版本。
@@ -74,6 +81,8 @@ export const RVC_PROTECT_MAX = 0.5;
 export const SINGER_DEFAULTS: SingerConfigSection = {
   enabled: false,
   tier: 'auto',
+  device: 'auto',
+  autoStart: true,
   runtimeDir: '',
   pythonPath: '',
   voicebankDir: '',
@@ -98,6 +107,7 @@ const K = `worlds.${SINGER_ID}`;
 
 /** `x-options` 的选项源，由定义的 `configOptions` 给出。 */
 export const TIER_OPTIONS = `${SINGER_ID}:tier`;
+export const DEVICE_OPTIONS = `${SINGER_ID}:device`;
 export const SCALE_OPTIONS = `${SINGER_ID}:scale`;
 /** 声库下拉：选项由 `banks.ts` 扫「声库总目录」现算，每项带语言与音色标签。 */
 export const BANK_OPTIONS = `${SINGER_ID}:bank`;
@@ -110,10 +120,15 @@ const TEXT = {
     groupSing: { title: '唱歌参数', description: '默认速度、移调与调式；面板里每次演唱还可以逐次覆盖。' },
     groupRvc: { title: 'RVC 后处理', description: '把绮萱的干声再送进 RVC 换成小肥鱼/星落落大肥鱼的音色。多一趟推理，默认关闭。' },
     groupService: { title: '运行与接口', description: '派生 venv、声库目录，以及给其他插件和外部大模型用的本机 HTTP 接口。' },
-    tier: { title: '推理档', description: '自动：检测到 NVIDIA 显卡就用显卡档，否则 CPU 档。改完在面板点「重启引擎」生效，切档会自动重建 venv。' },
+    tier: { title: '推理档', description: '自动：检测到 NVIDIA 显卡就借显卡档运行时，否则 CPU 档。它只决定派生 venv 用哪套运行时（CUDA / cuDNN 在显卡档里）；是否真的用显卡推理由下面的「推理设备」决定。改完在面板点「重启引擎」生效，切档会自动重建 venv。' },
     tierAuto: '自动',
     tierCuda: '显卡（NVIDIA）',
     tierCpu: 'CPU',
+    device: { title: '推理设备', description: '自动：显卡档运行时、派生 venv 里的 onnxruntime-gpu 与 NVIDIA 显卡都齐了就用显卡，缺一样退回 CPU。显卡推理多占约 0.8 GB 显存，热跑快约 6 倍；首次载入会热身一句，之后每句都不等。切到显卡后第一次「重启引擎」会补装 onnxruntime-gpu（约 215 MB，走阿里云镜像）。' },
+    autoStart: { title: '随 Coopanion 启动服务', description: '开着时插件随 Coopanion 一起拉起唱歌引擎与本机接口；关掉后即使插件已加载也先不启动，省内存，要用时在面板「服务」点「启动服务」。这项只在下次启动 Coopanion 时决定初始状态，当前这次随时可以用面板的启动 / 停止。' },
+    deviceAuto: '自动',
+    deviceCuda: '显卡（NVIDIA）',
+    deviceCpu: 'CPU',
     bpm: { title: '默认速度（BPM）', description: '60..200；每字时值按拍折算。' },
     keyShift: { title: '默认移调（半音）', description: '−12..12，正数更高。绮萱是女声，一般 0 到 +4。' },
     scale: { title: '默认调式', description: '大调明亮，小调忧郁；旋律由程序按调式自动生成。' },
@@ -139,10 +154,15 @@ const TEXT = {
     groupSing: { title: 'Singing', description: 'Default tempo, transpose and scale; the panel can override them per performance.' },
     groupRvc: { title: 'RVC post-processing', description: 'Send the dry Qixuan vocal through RVC to get the DaFeiyu timbre. One extra inference pass; off by default.' },
     groupService: { title: 'Runtime and API', description: 'Derived venv, voicebank folder, and the loopback HTTP endpoint for other plugins and online LLMs.' },
-    tier: { title: 'Inference tier', description: 'Auto uses the GPU tier when an NVIDIA GPU is detected, otherwise CPU. After changing this, click Restart engine — switching tiers rebuilds the venv automatically.' },
+    tier: { title: 'Inference tier', description: 'Auto borrows the GPU runtime when an NVIDIA GPU is detected, otherwise CPU. It only picks which runtime the derived venv is based on (CUDA / cuDNN live in the GPU tier); whether inference itself runs on the GPU is decided by Inference device below. After changing this, click Restart engine — switching tiers rebuilds the venv automatically.' },
     tierAuto: 'Auto',
     tierCuda: 'GPU (NVIDIA)',
     tierCpu: 'CPU',
+    device: { title: 'Inference device', description: 'Auto uses the GPU when the GPU runtime, onnxruntime-gpu in the derived venv and an NVIDIA GPU are all present; otherwise CPU. GPU inference takes about 0.8 GB of VRAM and is roughly 6x faster once warm; the engine sings a short warm-up line after loading, so the first real line never waits. Switching to GPU makes the next Restart engine install onnxruntime-gpu (~215 MB, Aliyun mirror first).' },
+    autoStart: { title: 'Start the service with Coopanion', description: 'On means the plugin brings the singing engine and the loopback API up together with Coopanion. Off keeps the service stopped even though the plugin is loaded, saving memory; click Start service in the Service panel when you need it. This only decides the initial state on the next Coopanion launch; the Start / Stop buttons still work any time.' },
+    deviceAuto: 'Auto',
+    deviceCuda: 'GPU (NVIDIA)',
+    deviceCpu: 'CPU',
     bpm: { title: 'Default tempo (BPM)', description: '60..200; note lengths are derived from the beat.' },
     keyShift: { title: 'Default transpose (semitones)', description: '−12..12, positive is higher. Qixuan is a female voice, usually 0 to +4.' },
     scale: { title: 'Default scale', description: 'Major is bright, minor is moody; the melody is generated in that scale.' },
@@ -207,7 +227,9 @@ export function configGroups(language: Language): ConfigGroup[] {
         title: t.groupService.title,
         description: t.groupService.description,
         properties: {
+          [`${K}.autoStart`]: { type: 'boolean', title: t.autoStart.title, description: t.autoStart.description, 'x-hot': false },
           [`${K}.tier`]: { type: 'string', title: t.tier.title, description: t.tier.description, 'x-options': TIER_OPTIONS, 'x-hot': false },
+          [`${K}.device`]: { type: 'string', title: t.device.title, description: t.device.description, 'x-options': DEVICE_OPTIONS, 'x-hot': false },
           [`${K}.runtimeDir`]: { type: 'string', title: t.runtimeDir.title, description: t.runtimeDir.description, 'x-path': { kind: 'directory' }, 'x-hot': false },
           [`${K}.pythonPath`]: { type: 'string', title: t.pythonPath.title, description: t.pythonPath.description, 'x-path': { kind: 'file', extensions: ['.exe'] }, 'x-hot': false },
           [`${K}.voicebankDir`]: { type: 'string', title: t.voicebankDir.title, description: t.voicebankDir.description, 'x-path': { kind: 'directory' }, 'x-hot': false },
@@ -234,6 +256,16 @@ export function tierOptions(language: Language): Array<{ value: SingerTier; labe
     { value: 'auto', label: t.tierAuto },
     { value: 'cuda', label: t.tierCuda },
     { value: 'cpu', label: t.tierCpu },
+  ];
+}
+
+/** 推理设备下拉。 */
+export function deviceOptions(language: Language): Array<{ value: SingerDevice; label: string }> {
+  const t = pick(language, TEXT);
+  return [
+    { value: 'auto', label: t.deviceAuto },
+    { value: 'cuda', label: t.deviceCuda },
+    { value: 'cpu', label: t.deviceCpu },
   ];
 }
 

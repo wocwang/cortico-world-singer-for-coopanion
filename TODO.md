@@ -52,6 +52,12 @@
   （World 仍挂载，约 1.3 GB 内存释放），再启动按当前配置重新载入；「重启引擎」也能把停掉的服务拨回来。
   配置 `x-hot` 按实际生效时机修正（声库/音色热改，路径/端口/令牌标「重启生效」），
   `describe.json` 补上环境提示词全文；`tests/service.test.ts` 5 个用例。
+- **显卡推理已做（0.1.14，2026-10-30）**：配置 `device`（`auto` / `cuda` / `cpu`，默认 `auto`）。
+  显卡档运行时的 `torch/lib` 带 CUDA / cuDNN，派生 venv 补 `onnxruntime-gpu==1.22.0`（约 215 MB，阿里云镜像优先），
+  worker 启动时把 venv 的 site-packages 插到 `sys.path` 最前，五个 ONNX 挂 CUDA provider
+  （`cudnn_conv_algo_search=HEURISTIC`；默认 EXHAUSTIVE 首句要 57 秒），载入后热身一句。
+  实测绮萱 5.96 秒歌：CPU 4.8 s/句；显卡载入 3.3 s + 热身 5.2 s、热跑 0.7 s/句、显存 +约 0.8 GB；
+  缺任何依赖（无 NVIDIA / 无显卡档运行时 / 没装 GPU 版 / CUDA 加载失败）自动退回 CPU。
 - **共享运行时可按需下载（0.1.8 / RVC 0.3.5）**：没有 `runtimes/gpt-sovits/<版本>/<档>` 时，
   唱歌下 CPU 档（约 1 GB）、RVC 按 `auto` 检测 NVIDIA 下显卡档（约 4.1 GB）或 CPU 档，
   布局与 gpt-sovits 一致，三个插件共用同一份。下载→SHA-256→tar 解压→`cortico-runtime.json` 有单测覆盖；

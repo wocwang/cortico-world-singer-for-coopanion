@@ -21,6 +21,11 @@ export interface VenvState {
 /** T0 探针里验证过的版本；运行时自带的 torch / onnxruntime / librosa 不再装。 */
 export const VENV_PACKAGES = ['diffsinger-utau==0.3.8'];
 /**
+ * 显卡推理：共享运行时里那份 onnxruntime 是 CPU 版，GPU 版要装进派生 venv
+ * （worker 启动时把 venv 的 site-packages 插到 sys.path 最前，才盖得住 base 的那份）。
+ */
+export const VENV_PACKAGES_GPU = ['onnxruntime-gpu==1.22.0'];
+/**
  * 依赖先走阿里云镜像（国内直连 PyPI 经常 SSL 中断；清华源对 pip 的 UA 返回 403，不能用），
  * 镜像失败再回官方 PyPI。网络参数收紧，免得默认重试把「安装中」卡住。
  */
@@ -37,6 +42,8 @@ export interface SingerVenvOptions {
   pythonPath: string;
   /** base 运行时的 python.exe；派生 venv 从它长出来。 */
   basePython: string;
+  /** 还要补 onnxruntime-gpu：只在「推理设备」不是 CPU、且 base 是显卡档运行时时为真。 */
+  gpu?: boolean;
   log?: Logger;
 }
 
@@ -60,7 +67,13 @@ export class SingerVenv {
       this.st = { phase: 'absent', detail: '推理档变了，需要重建派生 venv' };
       return this.state();
     }
-    if (await this.probe()) this.st = { phase: 'ready', detail: null };
+    if (await this.probe()) {
+      if (this.opts.gpu && !(await this.gpuProbe())) {
+        this.st = { phase: 'absent', detail: '还没装显卡推理依赖：在面板点「重启引擎」会自动补装' };
+        return this.state();
+      }
+      this.st = { phase: 'ready', detail: null };
+    }
     return this.state();
   }
 
@@ -88,7 +101,9 @@ export class SingerVenv {
         return;
       }
     }
-    if (await this.probe()) { this.st = { phase: 'ready', detail: null }; return; }
+    const diffOk = await this.probe();
+    const gpuOk = !this.opts.gpu || (await this.gpuProbe());
+    if (diffOk && gpuOk) { this.st = { phase: 'ready', detail: null }; return; }
     const { pythonPath, basePython } = this.opts;
     // 没有 base 就长不出 venv：面板的「一键安装」会先下一份共享运行时，这里只说清还差什么。
     if (!existsSync(basePython) && !existsSync(pythonPath)) {
@@ -100,16 +115,34 @@ export class SingerVenv {
       const code = await this.exec(basePython, ['-m', 'venv', '--system-site-packages', this.venvRoot()], PIP_TIMEOUT_MS);
       if (code !== 0) { this.st = { phase: 'error', detail: `创建 venv 失败：${this.lastLine()}` }; return; }
     }
-    this.st = { phase: 'working', detail: '安装 diffsinger-utau' };
-    const base = ['-I', '-X', 'utf8', '-u', '-m', 'pip', 'install', '--no-warn-script-location', ...PIP_NET_ARGS, ...VENV_PACKAGES];
-    let code = await this.exec(pythonPath, [...base, '-i', PIP_MIRROR], PIP_TIMEOUT_MS);
-    if (code !== 0) {
-      this.st = { phase: 'working', detail: '镜像没装上，换官方 PyPI 重试' };
-      this.opts.log?.warn('DiffSinger 依赖镜像失败，改走官方 PyPI', { tail: this.tail.slice(-3) });
-      code = await this.exec(pythonPath, [...base, '-i', PIP_OFFICIAL], PIP_TIMEOUT_MS);
+    if (!diffOk) {
+      this.st = { phase: 'working', detail: '安装 diffsinger-utau' };
+      const base = ['-I', '-X', 'utf8', '-u', '-m', 'pip', 'install', '--no-warn-script-location', ...PIP_NET_ARGS, ...VENV_PACKAGES];
+      let code = await this.exec(pythonPath, [...base, '-i', PIP_MIRROR], PIP_TIMEOUT_MS);
+      if (code !== 0) {
+        this.st = { phase: 'working', detail: '镜像没装上，换官方 PyPI 重试' };
+        this.opts.log?.warn('DiffSinger 依赖镜像失败，改走官方 PyPI', { tail: this.tail.slice(-3) });
+        code = await this.exec(pythonPath, [...base, '-i', PIP_OFFICIAL], PIP_TIMEOUT_MS);
+      }
+      if (code !== 0) { this.st = { phase: 'error', detail: `装依赖失败：${this.lastLine()}` }; return; }
     }
-    if (code !== 0) { this.st = { phase: 'error', detail: `装依赖失败：${this.lastLine()}` }; return; }
-    if (await this.probe()) this.st = { phase: 'ready', detail: null };
+    let gpuNote: string | null = null;
+    if (!gpuOk) {
+      this.st = { phase: 'working', detail: '安装显卡推理依赖（onnxruntime-gpu）' };
+      const base = ['-I', '-X', 'utf8', '-u', '-m', 'pip', 'install', '--no-warn-script-location', ...PIP_NET_ARGS, ...VENV_PACKAGES_GPU];
+      let code = await this.exec(pythonPath, [...base, '-i', PIP_MIRROR], PIP_TIMEOUT_MS);
+      if (code !== 0) {
+        this.st = { phase: 'working', detail: '镜像没装上，换官方 PyPI 重试' };
+        this.opts.log?.warn('onnxruntime-gpu 镜像失败，改走官方 PyPI', { tail: this.tail.slice(-3) });
+        code = await this.exec(pythonPath, [...base, '-i', PIP_OFFICIAL], PIP_TIMEOUT_MS);
+      }
+      if (code !== 0) {
+        // 显卡依赖不是必需：auto 会自动退回 CPU，别让整个 venv 失败。
+        gpuNote = '显卡推理依赖没装上，唱歌仍按 CPU 跑';
+        this.opts.log?.warn('onnxruntime-gpu 没装上，退回 CPU', { tail: this.tail.slice(-3) });
+      }
+    }
+    if (await this.probe()) this.st = { phase: 'ready', detail: gpuNote };
     else this.st = { phase: 'error', detail: `依赖装完了但 import 不过：${this.lastLine()}` };
   }
 
@@ -137,6 +170,18 @@ export class SingerVenv {
   private async probe(): Promise<boolean> {
     if (!existsSync(this.opts.pythonPath)) return false;
     const code = await this.exec(this.opts.pythonPath, ['-I', '-c', 'import diffsinger_utau'], PROBE_TIMEOUT_MS, false);
+    return code === 0;
+  }
+
+  /** 派生 venv 里有没有 GPU 版 onnxruntime（按发行包名查，别被 base 的 CPU 版骗了）。 */
+  private async gpuProbe(): Promise<boolean> {
+    if (!existsSync(this.opts.pythonPath)) return false;
+    const code = await this.exec(
+      this.opts.pythonPath,
+      ['-I', '-c', "import importlib.metadata as m; m.version('onnxruntime-gpu')"],
+      PROBE_TIMEOUT_MS,
+      false,
+    );
     return code === 0;
   }
 

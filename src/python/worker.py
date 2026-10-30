@@ -24,7 +24,9 @@ import json
 import hashlib
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -185,23 +187,65 @@ def midi_to_name(midi):
     return f"{MIDI_NAMES[midi % 12]}{octave}"
 
 
-def _force_basic_optimization():
-    """把 ORT 图优化降到 basic。
+def prepare_device(requested):
+    """按请求挑推理设备，返回实际能用的 `cuda` 或 `cpu`。
+
+    显卡档要两件事都成立：派生 venv 里装了 onnxruntime-gpu，且共享运行时带着
+    CUDA / cuDNN（torch/lib 走 PATH）。派生 venv 的 site-packages 必须排到共享运行时
+    之前，否则 import 到的还是共享运行时里的 CPU 版 onnxruntime。
+    """
+    if requested not in ("auto", "cuda"):
+        return "cpu"
+    site = Path(sys.prefix) / "Lib" / "site-packages"
+    if site.is_dir():
+        sys.path.insert(0, str(site))
+    try:
+        import onnxruntime as ort
+    except Exception as exc:
+        print(f"onnxruntime 载入失败，改用 CPU：{exc}", file=sys.stderr)
+        return "cpu"
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        print("没有 CUDA provider（派生 venv 里没装 onnxruntime-gpu，或 CUDA / cuDNN 不在 PATH），改用 CPU", file=sys.stderr)
+        return "cpu"
+    return "cuda"
+
+
+def _force_basic_optimization(device="cpu"):
+    """把 ORT 图优化降到 basic，并接管 provider（`cuda` 时挂 CUDA）。
 
     绮萱的声学模型（267 MB）在 onnxruntime 的 extended/all 级别优化时会原生崩溃
     （Windows 访问冲突 0xC0000005，1.19.2 与 1.22.0 都能复现），basic 级别正常。
     diffsinger_utau 自己建 SessionOptions，只能从这里包一层。
+
+    device 是 `cuda` 时给每个 session 都挂 CUDA provider；第一次建 session 就失败
+    （驱动 / cuDNN 缺失）时自动退回 CPU，最终生效的设备记在返回的 dict 的 `device` 上。
     """
     import onnxruntime as ort
 
     original = ort.InferenceSession
+    state = {"device": device if device == "cuda" else "cpu"}
 
     def session(path_or_bytes, sess_options=None, **kwargs):
         options = sess_options or ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
-        return original(path_or_bytes, sess_options=options, **kwargs)
+        if state["device"] == "cuda":
+            try:
+                # 默认的 EXHAUSTIVE 卷积搜索会在第一句上花掉几十秒；HEURISTIC 首句只要 1–2 秒。
+                return original(
+                    path_or_bytes,
+                    sess_options=options,
+                    providers=[
+                        ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}),
+                        "CPUExecutionProvider",
+                    ],
+                )
+            except Exception as exc:
+                print(f"CUDA 推理不可用，回退 CPU：{exc}", file=sys.stderr)
+                state["device"] = "cpu"
+        return original(path_or_bytes, sess_options=options, providers=["CPUExecutionProvider"])
 
     ort.InferenceSession = session
+    return state
 
 
 def normalize_bank_text(bank_dir):
@@ -256,8 +300,10 @@ def normalize_bank_text(bank_dir):
 
 
 class Singer:
-    def __init__(self, voicebank_dir):
+    def __init__(self, voicebank_dir, device="cpu"):
         self.voicebank_dir = Path(voicebank_dir)
+        self.device = device
+        self.device_state = {"device": device}
         self.pred = None
         self.replacer = None
         self.phoneme_set = None
@@ -273,7 +319,7 @@ class Singer:
 
     def load(self):
         normalize_bank_text(self.voicebank_dir)
-        _force_basic_optimization()
+        self.device_state = _force_basic_optimization(self.device)
         from diffsinger_utau.voice_bank import PredAll
         from diffsinger_utau.voice_bank.commons.ds_reader import DSTextReplacer
 
@@ -821,28 +867,60 @@ class Singer:
         }
 
 
+WARMUP_LYRICS = ("啊", "あ", "ah")
+
+
+def warmup(singer):
+    """显卡档第一次建 CUDA session 要付一次性开销（卷积算法与内核加载）。
+
+    载入后先用一句两秒以内的短句跑完整链路，把这段开销挪到引擎启动阶段，
+    用户点第一句时就不再等。声库里找不到对应音素就换下一个，全都不行也不影响就绪。
+    """
+    started = time.time()
+    for lyrics in WARMUP_LYRICS:
+        work = Path(tempfile.mkdtemp(prefix="singer-warmup-"))
+        try:
+            singer.sing({
+                "lyrics": lyrics, "bpm": 96, "scale": "major",
+                "acousticSteps": 10, "maxSeconds": 2, "out": str(work / "warmup.wav"),
+            })
+            print(f"[singer] 显卡热身完成 {time.time() - started:.1f}s", file=sys.stderr)
+            return True
+        except Exception as exc:
+            print(f"[singer] 热身「{lyrics}」没唱成：{exc}", file=sys.stderr)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    return False
+
+
 def main():
     if len(sys.argv) < 2:
-        send({"type": "fatal", "error": "用法：worker.py <声库目录>"})
+        send({"type": "fatal", "error": "用法：worker.py <声库目录> [auto|cpu|cuda]"})
         return 2
     voicebank = sys.argv[1]
     if not Path(voicebank).is_dir():
         send({"type": "fatal", "error": f"声库目录不存在：{voicebank}"})
         return 2
+    requested = sys.argv[2] if len(sys.argv) > 2 else "auto"
+    device = prepare_device(requested)
 
-    singer = Singer(voicebank)
+    singer = Singer(voicebank, device)
     try:
         speakers = singer.load()
     except Exception as exc:  # 声库结构不对或缺声码器，直接把原因带回面板
         send({"type": "fatal", "error": f"声库加载失败：{exc}"})
         traceback.print_exc()
         return 1
+    # session 建完才知道 CUDA 有没有真的用上（驱动 / cuDNN 问题会在建 session 时退回 CPU）。
+    device = singer.device_state.get("device", "cpu")
+    if device == "cuda":
+        warmup(singer)
     send({
         "type": "ready",
         "voicebank": Path(voicebank).name,
         "sampleRate": singer.sample_rate,
         "speakers": speakers,
-        "device": "cpu",
+        "device": device,
     })
 
     for line in sys.stdin:

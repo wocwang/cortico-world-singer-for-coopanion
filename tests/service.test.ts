@@ -60,9 +60,10 @@ function makeFake(): Fake {
   return fake;
 }
 
-function makeWorld(): {
+function makeWorld(device?: SingerConfigSection['device'], autoStart?: boolean): {
   cfg: SingerConfigSection;
   fake: Fake;
+  inits: EngineInit[];
   world: SingerWorld;
   invoke: (method: string, args?: unknown[]) => Promise<unknown>;
 } {
@@ -71,18 +72,23 @@ function makeWorld(): {
   const voicebankDir = join(dataDir, 'voicebank');
   mkdirSync(join(voicebankDir, 'dsdur'), { recursive: true });
   writeFileSync(join(voicebankDir, 'dsconfig.yaml'), 'singer_type: diffsinger\n');
-  const cfg: SingerConfigSection = { ...SINGER_DEFAULTS, enabled: true, httpApi: false, voicebankDir };
+  const cfg: SingerConfigSection = {
+    ...SINGER_DEFAULTS, enabled: true, httpApi: false, voicebankDir,
+    ...(device ? { device } : {}),
+    ...(autoStart === undefined ? {} : { autoStart }),
+  };
   const fake = makeFake();
+  const inits: EngineInit[] = [];
   const world = new SingerWorld({
     cfg,
     dataDir,
     runtimesRoot: () => join(dataDir, 'runtimes'),
-    createEngine: (_init: EngineInit) => fake as unknown as SingerEngine,
+    createEngine: (init: EngineInit) => { inits.push(init); return fake as unknown as SingerEngine; },
   });
   worlds.push(world);
   const invoke = (method: string, args: unknown[] = []): Promise<unknown> =>
     world.webUi('zh').invoke!('service', method, args);
-  return { cfg, fake, world, invoke };
+  return { cfg, fake, inits, world, invoke };
 }
 
 /** bootEngine 是后台起的：等一个宏任务让它把假引擎拉到 ready。 */
@@ -143,6 +149,29 @@ describe('推理服务手动启停', () => {
     await invoke('start');
     await nextTick();
     expect(fake.starts).toBe(1);
+  });
+
+  it('关掉「随 Coopanion 启动」后挂载不拉服务，手动启动仍可用', async () => {
+    const { world, fake, invoke } = makeWorld(undefined, false);
+    await world.start({ log } as unknown as WorldHost);
+    await nextTick();
+    expect(fake.starts).toBe(0);
+    expect((await invoke('state')) as State).toMatchObject({ service: false, phase: 'stopped' });
+
+    await invoke('start');
+    await nextTick();
+    expect(fake.starts).toBe(1);
+    expect((await invoke('state')) as State).toMatchObject({ service: true, ready: true });
+  });
+
+  it('推理设备传给引擎：默认 auto，配置 cpu 时照传', async () => {
+    const auto = makeWorld();
+    await auto.world.start({ log } as unknown as WorldHost);
+    expect(auto.inits[0]?.device).toBe('auto');
+
+    const cpu = makeWorld('cpu');
+    await cpu.world.start({ log } as unknown as WorldHost);
+    expect(cpu.inits[0]?.device).toBe('cpu');
   });
 
   it('停止服务后重启引擎会顺手把服务启回来', async () => {

@@ -174,7 +174,7 @@ const servicePanel: WebUiPanel = {
       const switchFailed = !s.switching && s.switchError ? t.bankSwitchFailed(s.switchError) : '';
       engineRow.detail.textContent = !s.service
         ? t.serviceOff
-        : [s.ready ? s.device ?? '' : s.detail, started, switching, switchFailed].filter(Boolean).join(' · ');
+        : [s.ready ? (s.device === 'cuda' ? t.deviceGpu : s.device === 'cpu' ? t.deviceCpu : s.device ?? '') : s.detail, started, switching, switchFailed].filter(Boolean).join(' · ');
       // 依赖（派生 venv）
       setPill(depsRow.pill, t[phaseKey(s.venv.phase)], toneOf(s.venv.phase));
       depsRow.detail.textContent = s.venv.detail

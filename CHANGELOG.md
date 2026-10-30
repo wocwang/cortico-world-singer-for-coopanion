@@ -1,5 +1,68 @@
 # 更新记录
 
+## 0.1.15（2026-10-30）可关掉随 Coopanion 自动启动
+
+**改了什么**
+
+- 新增配置「随 Coopanion 启动服务」`autoStart`（默认开）：开着时插件挂载即拉起唱歌引擎与本机接口；
+  关掉后插件仍加载，但服务保持停止（省内存），要用时在面板「服务」点「启动服务」。
+- 这只决定下次启动 Coopanion 时的初始状态；当前这次随时可以用面板的启动 / 停止，
+  「重启引擎」也照旧会把服务拨回开启。
+- 关掉自动启动时，后台的依赖检查（含补装 `onnxruntime-gpu`）照常做，只是不会顺手拉起引擎。
+- 市场显示名改为「DiffSinger唱歌」（英文 `DiffSinger Singing`），去掉「-绮萱」——现在已支持多个声库。
+
+`tests/service.test.ts`（新增 1 个）：关掉后挂载不拉服务、`state.service = false`、手动启动仍能就绪。
+一级验证 `pnpm typecheck && pnpm test`：75 个用例全绿。
+
+## 0.1.14（2026-10-30）显卡档（自动）
+
+**改了什么**
+
+- 新增配置「推理设备」`device`（`auto` / `cuda` / `cpu`，默认 `auto`）：显卡档运行时的
+  `torch/lib` 带 CUDA / cuDNN，派生 venv 再补 `onnxruntime-gpu==1.22.0`（约 215 MB，阿里云镜像优先），
+  worker 启动时把 venv 的 site-packages 插到 `sys.path` 最前（盖住共享运行时里的 CPU 版 onnxruntime），
+  五个 ONNX 都挂 CUDA provider；缺任何一样（没有 NVIDIA、没有显卡档运行时、没装 GPU 版、
+  CUDA / cuDNN 加载失败）都自动退回 CPU。
+- 卷积搜索固定 `HEURISTIC`：默认的 `EXHAUSTIVE` 会在第一句花 57 秒做算法搜索，`HEURISTIC` 只要 1.8 秒。
+- 载入后先热身一句短句（只限显卡），把首跑的一次性开销挪到启动阶段；热身失败不影响就绪。
+- `engine.ts` 把设备名传给 worker，并在 PATH 里加上运行时的 `torch/lib`（CUDA / cuDNN 依赖）。
+- 面板引擎行显示「显卡推理 / CPU 推理」，`ready` 回执里的 `device` 现在是实际生效值（原先固定 `cpu`）。
+- 配置「推理档」文案说明它只决定借哪套运行时，是否用显卡看「推理设备」。
+
+**实测**（RTX 5070 Ti Laptop + 绮萱，5.96 秒歌、acousticSteps=20）
+
+| 设备 | 载入 | 热跑 | 显存增量 |
+| --- | --- | --- | --- |
+| CPU | 2.9 s | 4.8 s/句 | 0 |
+| 显卡（HEURISTIC） | 3.3 s + 热身 5.2 s | 0.7 s/句 | 约 0.8 GB |
+
+正常长度的歌词连唱三次，CPU / 显卡的音高与时长一致（F0≈329 Hz、2.519 s）。
+单字歌词（如「啊」）本身在这套声库里 pitch 预测不稳定，CPU 与显卡都会偶尔落到 midi 0，与本档改动无关。
+
+`tests/venv.test.ts` + `tests/service.test.ts`（新增 3 个）：GPU 依赖版本、不需要显卡时不探测、
+设备名交给引擎；一级验证 `pnpm typecheck && pnpm test`：74 个用例全绿。
+
+## 0.1.13（2026-10-30）桌宠本机发声
+
+**改了什么**
+
+- 新增工具 `singer_sing`：桌宠 / 对话页里 Coo 唱歌不再经过 gpt-sovits 的 `sovits_speak`，
+  由本插件合成后直接写进本机声卡（随包 audify/RtAudio，Windows WASAPI，系统默认设备、满音量），
+  第一块 PCM 写进输出流之后才回执。整段最多等 60 秒：DiffSinger 是整句批式合成，超时先回「还在准备」，
+  合成不取消，就绪后照常出声。
+- 工具说明与环境提示词按 Pal-AI-Lab/Coopanion#538 的写法：要求模型在同一次回复里先调 `singer_sing`、
+  紧接着调 `pet_say`、不等回执——Cortico 按顺序执行同一批工具调用，气泡正好在声音响起时出现。
+  不写「返回时声音已开始」，否则模型会拆成两次回复，气泡反而更晚。
+- QQ 点歌链路不变（`qq_send` + `voice: true` + 正文「【唱】」仍由语音通道转给本插件 HTTP 接口）；
+  提示词补充：QQ 里不要调 `singer_sing`（它只在本机外放）。
+- `describe.json` 重新生成，登记 `singer_sing`（tools 1 / events 0 / prompts 1）。
+- 包体新增 `vendor/audify`（6 个文件约 840 KB，含 audify / RtAudio / Opus 的许可证），`files` 已随包发布。
+- 服务停着时工具回「no sound」并提示主人点「启动服务」；缺 `lyrics`、合成失败、播放失败都回可读的失败回执，
+  HTTP 接口、面板、QQ 唱歌链路不受影响。
+
+`tests/player.test.ts` + `tests/tool.test.ts`（10 个）：播放器 `upmix` / wav 头解析、工具注册、
+服务停、缺歌词、正常写入播放器、播放失败。一级验证 `pnpm typecheck && pnpm test`：71 个用例全绿。
+
 ## 0.1.12（2026-10-30）推理服务手动启停
 
 **改了什么**

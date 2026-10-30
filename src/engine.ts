@@ -31,8 +31,10 @@ export interface EngineOptions {
   voicebankDir: string;
   /** worker.py 的绝对路径。 */
   scriptPath: string;
-  /** base 运行时目录，只为把它的 `runtime` 放进 PATH（CUDA / cuDNN 依赖）。 */
+  /** base 运行时目录，只为把它的 `runtime` 与 `torch/lib` 放进 PATH（CUDA / cuDNN 依赖）。 */
   runtimeDir?: string;
+  /** 推理设备：`auto` 由 worker 探测 CUDA provider，`cpu` / `cuda` 强制指定。 */
+  device?: 'auto' | 'cpu' | 'cuda';
   /** 单次演唱上限；超时杀 worker 并报推理失败。 */
   timeoutMs?: number;
   /** 启动到就绪（含载入声库）的上限。 */
@@ -226,7 +228,7 @@ export class SingerEngine {
     if (!existsSync(join(this.opts.voicebankDir, 'dsconfig.yaml'))) {
       fail(`声库目录里没有 dsconfig.yaml：${this.opts.voicebankDir}（在面板点「一键安装」下载声库）`);
     }
-    const child = spawn(python, [script, this.opts.voicebankDir], {
+    const child = spawn(python, [script, this.opts.voicebankDir, this.opts.device ?? 'auto'], {
       cwd: dirname(script),
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -270,7 +272,11 @@ export class SingerEngine {
 
   private searchPath(): string {
     const dirs = [dirname(this.opts.pythonPath)];
-    if (this.opts.runtimeDir) dirs.push(join(this.opts.runtimeDir, 'runtime'));
+    if (this.opts.runtimeDir) {
+      dirs.push(join(this.opts.runtimeDir, 'runtime'));
+      // onnxruntime-gpu 的 CUDA / cuDNN 依赖住在 torch/lib（只有显卡档运行时才有）。
+      dirs.push(join(this.opts.runtimeDir, 'runtime', 'Lib', 'site-packages', 'torch', 'lib'));
+    }
     return [...dirs, process.env.PATH ?? ''].join(';');
   }
 

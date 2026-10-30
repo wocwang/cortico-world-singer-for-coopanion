@@ -1,18 +1,19 @@
 /**
- * DiffSinger 唱歌 World：`kind = world`，只做「歌词进、wav 出」。
+ * DiffSinger 唱歌 World：`kind = world`，做「歌词进、wav 出」，并能在本机把一句唱出来。
  *
  * 挂载时拉起两样东西：
  * 1. 常驻 Python worker（`src/python/worker.py`，见 engine.ts）——载入声库，之后每首歌只走推理；
  * 2. 本机 HTTP 接口（server.ts，默认 127.0.0.1:9882）——给其他插件与外部大模型用。
  *
- * 本 World 不注册工具、不发事件：文字由 gpt-sovits 管，QQ 消息由 QQ 插件管。
+ * 工具 `singer_sing` 给桌宠 / 对话页用：合成完把 PCM 写进本机声卡才回执；提示词要求先调它、
+ * 紧接着 `pet_say`，气泡与声音同时开始（见 Pal-AI-Lab/Coopanion#538）。QQ 点歌仍走 qq_send + voice=true。
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { Language } from 'cortico/core/language.ts';
-import type { Logger, World, WorldHost, WorldLamp, WorldWebUiDecl } from 'cortico/core/types.ts';
+import type { Logger, ToolDef, ToolOutcome, World, WorldHost, WorldLamp, WorldWebUiDecl } from 'cortico/core/types.ts';
 import {
   configGroups, DEFAULT_PORT, SINGER_ID, worldLabel,
   type SingerConfigSection, type SingerTier,
@@ -20,6 +21,9 @@ import {
 import { SingerEngine, SingerError, type EngineState } from './engine.ts';
 import { SingerInstaller } from './install.ts';
 import { rvcPost } from './rvc.ts';
+import { Player, type WavPlayer } from './player.ts';
+import { SINGER_TOOL_DECLS } from './tools.ts';
+import { parseWavHeader } from './wav.ts';
 import {
   LYRICS_MAX, MAX_SECONDS_MAX, MAX_SECONDS_MIN, readSingJob, startSingServer, STEPS_MAX, STEPS_MIN,
   type SingDeps, type SingJob, type SingOutcome, type SingServerHandle,
@@ -31,9 +35,11 @@ import { panelText } from './webui/text.ts';
 import { VOCODER_PAGE, VOICEBANK_PAGE, VOICEBANK_VERSION } from './catalog.ts';
 
 const WORKER_SCRIPT = fileURLToPath(new URL('./python/worker.py', import.meta.url));
-/** 告诉模型「在 QQ 里怎么点歌」的环境提示词模板。 */
+/** 告诉模型「在哪唱歌、怎么点歌」的环境提示词模板。 */
 const ENV_PROMPT_PATH = fileURLToPath(new URL('../prompts/env.md', import.meta.url));
-const VERSION = '0.1.12';
+const VERSION = '0.1.15';
+/** `singer_sing` 等这一句唱进声卡的上限：DiffSinger 是整句批式合成（实测 0.5–11 秒），留足余量。 */
+const SING_ALOUD_MAX_MS = 60_000;
 /** 换声库时最多等旧引擎把排队的句子唱完（超时也照样切，别把用户卡死）。 */
 const SWITCH_DRAIN_MS = 180_000;
 
@@ -44,6 +50,8 @@ export interface SingerWorldOptions {
   runtimesRoot: () => string;
   /** 建引擎的工厂；单测里注入假引擎用，不传就按配置建真的 `SingerEngine`。 */
   createEngine?: (init: EngineInit) => SingerEngine;
+  /** 建本机播放器；单测里注入假播放器用，不传就用随包 audify 的真播放器。 */
+  createPlayer?: (log: Logger) => WavPlayer;
 }
 
 export interface EngineInit {
@@ -51,6 +59,12 @@ export interface EngineInit {
   voicebankDir: string;
   scriptPath: string;
   runtimeDir?: string;
+  device?: 'auto' | 'cpu' | 'cuda';
+}
+
+/** 这套运行时带不带 CUDA / cuDNN：torch/lib 里有 cuDNN 9 的 DLL 才算显卡档。 */
+function runtimeHasCuda(dir: string): boolean {
+  return dir !== '' && existsSync(join(dir, 'runtime', 'Lib', 'site-packages', 'torch', 'lib', 'cudnn64_9.dll'));
 }
 
 /** 配置 → 实际使用的声库目录：选了「声库总目录」里的某个库就用它，否则用单独的「声库目录」。 */
@@ -99,6 +113,8 @@ export class SingerWorld implements World {
   private readonly opts: SingerWorldOptions;
   private log: Logger | null = null;
   private engine: SingerEngine | null = null;
+  /** 本机播放器：`singer_sing` 把 PCM 写进它；原生模块用到才加载。 */
+  private player: WavPlayer | null = null;
   private installer: SingerInstaller | null = null;
   private venv: SingerVenv | null = null;
   /** 共享运行时（gpt-sovits 的 CPU 档）——没有就自己下一份，三个插件共用。 */
@@ -150,8 +166,9 @@ export class SingerWorld implements World {
     return { 'singer.state': state };
   }
 
-  tools(): [] {
-    return [];
+  tools(): ToolDef[] {
+    const decl = SINGER_TOOL_DECLS[0];
+    return [{ ...decl, handler: (args) => this.singAloud(args) }];
   }
 
   webUi(language: Language = 'zh'): WorldWebUiDecl {
@@ -170,11 +187,11 @@ export class SingerWorld implements World {
         { id: 'sing', title: t.singTitle, description: t.singHint, getMethods: ['state'] },
       ],
       invoke: async (panel, method, args) => this.invoke(panel, method, args),
-      // 告诉模型 QQ 里怎么点歌：qq_send + voice=true + 正文以【唱】开头。
+      // 给模型的唱歌写法：QQ 用 qq_send + voice=true；桌宠 / 对话页用 singer_sing，紧跟 pet_say。
       promptDocs: [{
         key: `worlds.${SINGER_ID}.envPrompt`,
         title: `${worldLabel(language)} · 环境提示词`,
-        description: '在 QQ 里点歌的写法：qq_send 传 voice=true，正文以「【唱】」开头。',
+        description: 'QQ 点歌用 qq_send + voice=true；桌宠 / 对话页用 singer_sing，紧跟 pet_say。',
         path: ENV_PROMPT_PATH,
         role: 'envPrompt',
         vars: [{ name: 'singer.state', description: '唱歌引擎此刻的状态（就绪 / 启动中 / 出错 / 未启动）。' }],
@@ -186,13 +203,41 @@ export class SingerWorld implements World {
 
   async start(host: WorldHost): Promise<void> {
     this.log = host.log;
+    this.player = this.opts.createPlayer ? this.opts.createPlayer(host.log) : new Player(host.log);
     this.stopped = false;
     this.launchDetail = '';
     this.setup();
-    // 挂载时默认拉起推理服务；面板上可以手动停掉再启回来（例如省内存）。
-    this.startService();
+    // 随 Coopanion 启动就看配置；关掉时插件仍加载，但引擎与接口先不启动，面板随时可以手动开。
+    if (this.opts.cfg.autoStart !== false) {
+      this.startService();
+    } else {
+      this.serviceOn = false;
+      this.launchDetail = '';
+    }
     // 已有的派生 venv 不必等用户点安装：后台探一次，面板直接显示就绪。
-    void this.venv?.check();
+    void this.prepareVenvOnStart();
+  }
+
+  /**
+   * 挂载时后台查一次派生 venv；升级到显卡档后如果缺 `onnxruntime-gpu`，
+   * 顺手补装：先停掉已按 CPU 拉起的引擎（pip 覆盖不了 worker 占着的 .pyd/.dll），
+   * 装完再按当前配置拉回来。还没有派生 venv 时不动，留给面板「一键安装」。
+   */
+  private prepareVenvOnStart(): void {
+    const venv = this.venv;
+    if (!venv) return;
+    void venv.check()
+      .then(async (st) => {
+        if (this.stopped || st.phase !== 'absent') return;
+        if (this.opts.cfg.device === 'cpu' || !runtimeHasCuda(this.runtimeDir)) return;
+        if (!existsSync(this.pythonPath)) return;
+        await this.engine?.stop();
+        if (this.stopped) return;
+        await venv.ensure();
+        if (this.stopped) return;
+        if (venv.state().phase === 'ready') this.bootEngine();
+      })
+      .catch(() => undefined);
   }
 
   /** 按当前配置解析路径并（重）建 installer / venv / engine；改推理档后重启引擎会再走一遍。 */
@@ -210,6 +255,10 @@ export class SingerWorld implements World {
     this.venv = new SingerVenv({
       pythonPath: paths.pythonPath,
       basePython: paths.runtimeDir ? join(paths.runtimeDir, 'runtime', 'python.exe') : '',
+      // 显卡推理的两块依赖都在显卡档运行时里：GPU 版 onnxruntime 装进派生 venv，
+      // CUDA / cuDNN 从运行时的 torch/lib 借；CPU 档运行时没有这些，就不白装 215 MB。
+      gpu: this.opts.cfg.device !== 'cpu'
+        && (paths.runtimeTier === 'cuda' || runtimeHasCuda(paths.runtimeDir)),
       log: this.log ?? undefined,
     });
     // 重启/重新解析路径后，上次换声库的失败记录一并清掉（下一句会重新试一次）。
@@ -227,6 +276,7 @@ export class SingerWorld implements World {
       voicebankDir,
       scriptPath: WORKER_SCRIPT,
       runtimeDir: this.runtimeDir || undefined,
+      device: this.opts.cfg.device,
     };
     if (this.opts.createEngine) return this.opts.createEngine(init);
     return new SingerEngine({ ...init, log: this.log ?? undefined });
@@ -260,6 +310,9 @@ export class SingerWorld implements World {
   async stop(): Promise<void> {
     this.stopped = true;
     this.serviceOn = false;
+    this.player?.cut();
+    this.player?.close();
+    this.player = null;
     this.installer?.cancel();
     this.venv?.cancel();
     const server = this.server;
@@ -396,6 +449,65 @@ export class SingerWorld implements World {
     const next = this.singChain.then(run, run);
     this.singChain = next.catch(() => undefined);
     return next;
+  }
+
+  /** 桌宠 / 对话页里唱一句：合成完把 PCM 写进本机声卡，起播（或失败）后才回执。 */
+  private async singAloud(args: Record<string, unknown>): Promise<ToolOutcome> {
+    // 整句批式合成要几秒：给整段一个兜底上限。超时先回「还在准备」，合成不取消，就绪后照常出声。
+    const capped = await Promise.race([this.singAloudOnce(args), delayed(SING_ALOUD_MAX_MS)]);
+    if (capped) return capped;
+    return {
+      text: `The line is still being prepared after ${SING_ALOUD_MAX_MS / 1000} s; it will be sung when ready.`,
+      failed: true,
+    };
+  }
+
+  private async singAloudOnce(args: Record<string, unknown>): Promise<ToolOutcome> {
+    if (!this.serviceOn) {
+      return {
+        text: 'No sound: the singing service is stopped. Ask the owner to press "启动服务" on the DiffSinger page.',
+        failed: true,
+      };
+    }
+    let job: SingJob;
+    try {
+      // 工具只给 lyrics：速度 / 调式 / 移调取配置里的默认值，时长压到 30 秒内（桌宠里一句不会太长）。
+      job = readSingJob({
+        ...args,
+        save: false,
+        base64: false,
+        bpm: this.opts.cfg.bpm,
+        keyShift: this.opts.cfg.keyShift,
+        scale: this.opts.cfg.scale,
+        maxSeconds: 30,
+      });
+    } catch (err) {
+      return { text: `Nothing sung: ${err instanceof Error ? err.message : String(err)}.`, failed: true };
+    }
+    let out: SingOutcome;
+    try {
+      out = await this.sing(job);
+    } catch (err) {
+      return { text: `Nothing sung: ${err instanceof Error ? err.message : String(err)}.`, failed: true };
+    }
+    const player = this.player;
+    try {
+      if (!player) throw new Error('本机播放器未就绪');
+      const head = parseWavHeader(out.audio);
+      if (!head) throw new Error('输出不是合法的 WAV');
+      if (head.channels !== 1 || head.bitsPerSample !== 16) {
+        throw new Error(`只支持单声道 16-bit PCM，这一句是 ${head.channels} 声道 / ${head.bitsPerSample}-bit`);
+      }
+      await player.write(head.sampleRate, out.audio.subarray(head.dataStart));
+      player.flush();
+    } catch (err) {
+      return {
+        text: `Sang one line but could not play it on this computer: ${err instanceof Error ? err.message : String(err)}.`,
+        failed: true,
+      };
+    }
+    this.log?.info('桌宠里唱了一句', { seconds: out.seconds, ms: out.ms, bytes: out.audio.length });
+    return { text: `Sang one line (${out.seconds.toFixed(1)} s) on this computer.` };
   }
 
   /** 配置里的声库变了就地重建引擎；音色每句现读，不用重启。 */
@@ -683,6 +795,11 @@ function stamp(): string {
   const p = (n: number): string => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
+
+/** 等 `ms` 毫秒后给出 `null`，给一段等待加个上限；不拖住进程退出。 */
+const delayed = (ms: number): Promise<null> => new Promise((resolve) => {
+  setTimeout(() => resolve(null), ms).unref();
+});
 
 const silentLogger: Logger = {
   trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, emit: () => {},

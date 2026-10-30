@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SingerVenv, VENV_PACKAGES } from '../src/venv.ts';
+import { SingerVenv, VENV_PACKAGES, VENV_PACKAGES_GPU } from '../src/venv.ts';
 
 const roots: string[] = [];
 
@@ -19,6 +19,16 @@ const tempDir = (): string => {
 describe('派生 venv', () => {
   it('只补 diffsinger-utau，不碰运行时的 torch', () => {
     expect(VENV_PACKAGES).toEqual(['diffsinger-utau==0.3.8']);
+  });
+
+  it('显卡推理补 onnxruntime-gpu，版本跟探针一致', () => {
+    expect(VENV_PACKAGES_GPU).toEqual(['onnxruntime-gpu==1.22.0']);
+  });
+
+  it('不需要显卡时不补 onnxruntime-gpu，也不探测它', async () => {
+    const dir = tempDir();
+    const venv = new SingerVenv({ pythonPath: join(dir, 'venv'), basePython: '' });
+    expect((await venv.check()).phase).toBe('absent');
   });
 
   it('初始是未安装', () => {

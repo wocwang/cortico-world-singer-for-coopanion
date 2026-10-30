@@ -1,12 +1,38 @@
 {
-  "tools": [],
+  "tools": [
+    {
+      "name": "singer_sing",
+      "description": "Sing one line aloud on this computer in your singing voice. Emit it in the same reply as the pet_say that shows the same line, immediately followed by that pet_say, without waiting for this result: tools run in order, so the bubble appears as the voice begins. Write Chinese lyrics as Han characters, Japanese as kana (needs a Japanese voicebank), English as space-separated words.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "lyrics": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "The lyric line to sing."
+          }
+        },
+        "required": [
+          "lyrics"
+        ]
+      },
+      "tags": [
+        "speak"
+      ],
+      "summary": {
+        "zh": "在本机把一句歌词唱出来，紧跟 pet_say 调用，气泡与声音同时开始。",
+        "en": "Sings one lyric line on this computer, right before the pet_say that shows the same line, so the bubble appears as the voice begins."
+      }
+    }
+  ],
   "events": [],
   "prompts": [
     {
       "key": "worlds.singer.envPrompt",
       "title": "DiffSinger 唱歌 · 环境提示词",
       "role": "envPrompt",
-      "content": "## 唱歌（DiffSinger · 绮萱）\n\n状态：{{singer.state}}\n\n- QQ 里有人点歌、想听你唱一句，或聊天的气氛适合唱时：调 `qq_send`，`to` 照抄事件 meta 里的 `conv`，`voice` 设为 true，正文只写「【唱】」加一句中文歌词。\n- 歌词按刚才的聊天现写，一句 8–16 字，中文；那条消息里不要写别的话，否则会连着一起被唱。\n- 想先说一句再说唱，就分两次发：先用 `qq_send`（不带 voice）说那句话，再单独发一条带 `voice: true` 的「【唱】…」。\n- 语音通道会把「【唱】…」交给唱歌插件唱成语音条，不用调 `sovits_speak`，也不用解释「这就唱给你听」。\n- 桌宠或对话页里想唱时：调 `sovits_speak`，正文写「【唱】」加一句歌词（不要传 silent），它会在本机把这一句唱出来；唱歌面板和 `POST /sing` 也照常可用。\n- 唱日语要写假名（汉字没有读音会被跳过），而且得先把唱歌插件的声库换成日语声库；没换之前日语歌词唱不出来，会退回念。\n- 唱英语按单词写（空格分词）；用自带英语词典的声库（绮萱自带，不用换）。要唱中文就换回中文声库。\n- 状态是「未启动」时多半是面板里点过「停止服务」：让主人到「DiffSinger 唱歌」页点「启动服务」，别假装已经唱了。\n"
+      "content": "## 唱歌（DiffSinger · 绮萱）\n\n状态：{{singer.state}}\n\n- QQ 里有人点歌、想听你唱一句，或聊天的气氛适合唱时：调 `qq_send`，`to` 照抄事件 meta 里的 `conv`，`voice` 设为 true，正文只写「【唱】」加一句中文歌词。\n- 歌词按刚才的聊天现写，一句 8–16 字，中文；那条消息里不要写别的话，否则会连着一起被唱。\n- 想先说一句再说唱，就分两次发：先用 `qq_send`（不带 voice）说那句话，再单独发一条带 `voice: true` 的「【唱】…」。\n- 语音通道会把「【唱】…」交给唱歌插件唱成语音条，不用调 `sovits_speak`，也不用解释「这就唱给你听」；QQ 里也不要调 `singer_sing`（它只在本机外放）。\n- 桌宠或对话页里想唱时：在同一次回复里先调 `singer_sing`（`lyrics` 写这一句歌词），紧接着调 `pet_say` 显示同一句歌词；两个调用连着发出，不要等 `singer_sing` 的回执——工具按顺序执行，气泡会正好在声音响起时出现。`singer_sing` 只在本机外放，不会发到 QQ；唱歌面板和 `POST /sing` 也照常可用。\n- 唱日语要写假名（汉字没有读音会被跳过），而且得先把唱歌插件的声库换成日语声库；没换之前日语歌词唱不出来，会退回念。\n- 唱英语按单词写（空格分词）；用自带英语词典的声库（绮萱自带，不用换）。要唱中文就换回中文声库。\n- 状态是「未启动」时多半是面板里点过「停止服务」：让主人到「DiffSinger 唱歌」页点「启动服务」，别假装已经唱了；这时 `singer_sing` 会回没有声音。\n"
     }
   ]
 }
