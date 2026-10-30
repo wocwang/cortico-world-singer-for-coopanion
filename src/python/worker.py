@@ -7,7 +7,8 @@ Node 侧（engine.ts）把 JSON 一行写进 stdin，worker 把 JSON 一行写�
 其余输出（含 diffsinger_utau 自己打印的进度）全部改道 stderr，免得污染协议。
 
 一次 `sing` 的完整链路：
-    歌词 → 按标点断句 → 每字/每假名取音素（中文查拼音，日语查声库自带假名词典）
+    歌词 → 按标点断句 → 每字/每假名/每词取音素（中文查拼音，日语查声库自带假名词典，
+    英语查声库自带英语词典并按音节分音符）
          → 程序生成五声音阶旋律
          → DS 段落（note_seq / note_dur / ph_seq / ph_num）
          → diffsinger_utau（dur → pitch → variance → acoustic → vocoder）→ wav
@@ -44,8 +45,8 @@ SCALES = {
     "minor": [0, 3, 5, 7, 10],
 }
 
-# 断句：句读与空白都算分隔，其余非汉字/假名一律丢掉。
-PHRASE_SPLIT = re.compile(r"[，。！？、；：,.!?;:\s…—~～\[\]【】()（）\"'“”‘’]+")
+# 断句：只按句读断，空白留给各语言自己切（英语按空格分词，中日文忽略空白）。
+PHRASE_SPLIT = re.compile(r"[，。！？、；：,.!?;:…—~～\[\]【】()（）\"“”‘’]+")
 HAN = re.compile(r"[\u4e00-\u9fff]")
 # 假名（平假名 + 片假名）：日语声库按「一拍一个假名」出音符。
 KANA = re.compile(r"[\u3041-\u309f\u30a1-\u30ff]")
@@ -54,11 +55,106 @@ SOKUON = set("っッ")
 LONG_VOWEL = "ー"
 # 能重复成长音的音素：日语声库的元音音素大小写都可能有（`a` 与 `I`、`U`、`O`）。
 VOWELS = set("aiueoAIUEO")
+# 英语单词（含 don't 这类缩写）；按空格分词后逐词查声库自带的英语词典。
+EN_WORD = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
+# ARPABET / CMU 的元音（去掉 en/ 前缀与重音数字后），用来把一个单词切成音节。
+EN_VOWELS = set(
+    "aa ae ah ao aw ay ax axr eh er ey ih ix iy ow oy uh uw".split()
+) | set("aeiou")
 
 
 def kata_to_hira(text):
     """片假名转平假名（U+30A1–U+30F6 平移到 U+3041–U+3096，长音符不动）。"""
     return "".join(chr(ord(ch) - 0x60) if "\u30a1" <= ch <= "\u30f6" else ch for ch in text)
+
+
+# 英语词典超过这个大小就按「歌词里出现的词」流式挑，不在启动时整份解析
+# （绮萱的 dsdict-en.yaml 有 27 MB、220 万行，整份 safe_load 要几十秒）。
+EN_DICT_MAX_BYTES = 4 * 1024 * 1024
+# 词典/声库写法不一致时的小别名：只在原样、en/ 前缀、去前缀都查不到时再试。
+EN_PHONEME_ALIASES = {
+    "axr": "er", "ix": "ih", "el": "l", "em": "m", "hv": "hh", "vcl": "cl",
+}
+
+
+def en_word(raw):
+    """词典里的 grapheme / 歌词里的单词统一成小写、直引号；不是单词返回空。"""
+    text = str(raw or "").strip().lower().replace("’", "'")
+    if not text or not EN_WORD.fullmatch(text):
+        return ""
+    return text
+
+
+def arpabet_base(phoneme):
+    """`en/AA1` / `AA` / `en/ax` → `aa` / `aa` / `ax`：判元音、找音节用。"""
+    text = str(phoneme or "").lower()
+    if "/" in text:
+        text = text.split("/")[-1]
+    return re.sub(r"[0-9]+$", "", text)
+
+
+# 英语词典有两种写法：多语言声库（绮萱）是块状 `- grapheme:` + `  phonemes:`，
+# OpenUtau 原生英语声库（Hanami）是一行流式 `- {grapheme: "...", phonemes: [...]}`。
+EN_FLOW_ENTRY = re.compile(
+    r'\{[^{}]*grapheme:\s*"((?:[^"\\]|\\.)*)"[^{}]*phonemes:\s*\[([^\]]*)\]'
+)
+# ARPABET 的双字母元音：日语词典里没有，用它区分「英语词典」和「日语词典」。
+EN_ARPA_VOWELS = set("aa ae ah ao aw ay ax eh er ey ih iy ow oy uh uw".split())
+
+
+def yaml_scalar(text):
+    """词典里的一个 YAML 标量 → 字符串（去引号；单引号里的 `''` 是一个 `'`）。"""
+    value = str(text or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        return value[1:-1].replace('\\"', '"')
+    return value
+
+
+def iter_en_entries(lines):
+    """逐条吐 (grapheme, [phoneme])，两种词典写法都认；不整份解析 YAML。
+
+    绮萱的 dsdict-en.yaml 有 27 MB、220 万行，`yaml.safe_load` 要几十秒，
+    而一句歌词里出现的词就那么几个，按行挑比整份解析划算得多（扫一遍约 0.5 s）。
+    """
+    grapheme = None
+    phones = []
+    reading = False
+    for line in lines:
+        text = line.strip()
+        flow = EN_FLOW_ENTRY.match(text)
+        if flow:
+            if grapheme and phones:
+                yield yaml_scalar(grapheme), phones
+            grapheme, phones, reading = None, [], False
+            items = [yaml_scalar(p) for p in flow.group(2).split(",") if p.strip()]
+            yield yaml_scalar(flow.group(1)), items
+            continue
+        if text.startswith("- grapheme:"):
+            if grapheme and phones:
+                yield yaml_scalar(grapheme), phones
+            grapheme = text[len("- grapheme:"):]
+            phones, reading = [], False
+            continue
+        if grapheme and text.startswith("phonemes:"):
+            inline = text[len("phonemes:"):].strip()
+            if inline.startswith("["):
+                yield yaml_scalar(grapheme), [yaml_scalar(p) for p in inline.strip("[]").split(",") if p.strip()]
+                grapheme, phones, reading = None, [], False
+            else:
+                reading = True
+            continue
+        if grapheme and reading:
+            if text.startswith("- "):
+                phones.append(yaml_scalar(text[2:]))
+            elif not text or text.startswith("#"):
+                continue
+            else:  # 条目里出现别的字段：先收尾，别让后面别的段被当成本条的音素
+                yield yaml_scalar(grapheme), phones
+                grapheme, phones, reading = None, [], False
+    if grapheme and phones:
+        yield yaml_scalar(grapheme), phones
 
 
 SPEAKER_PREFIXES = ("acoustic_", "variance_", "dur_", "pitch_")
@@ -167,6 +263,12 @@ class Singer:
         self.phoneme_set = None
         self.ja_dict = {}
         self.ja_dict_path = None
+        # 英语词典：小词典整份读进 en_cache；大词典按歌词里的词流式扫，
+        # 命中的词与未命中的词都缓存（None 表示查过但没有）。
+        self.en_dict_path = None
+        self.en_cache = {}
+        self.en_full = False   # 小词典是否已整份读进 en_cache
+        self.en_small = True
         self.sample_rate = 44100
 
     def load(self):
@@ -183,6 +285,9 @@ class Singer:
         if table is not None:
             self.phoneme_set = set(table.content.keys())
         self.ja_dict_path = self.find_ja_dict()
+        self.en_dict_path = self.find_en_dict()
+        if self.en_dict_path is not None:
+            self.en_small = self.en_dict_path.stat().st_size <= EN_DICT_MAX_BYTES
         self.install_color_router()
         return self.speaker_colors()
 
@@ -297,6 +402,144 @@ class Singer:
             print(f"日语假名词典: {len(merged)} 条", file=sys.stderr)
         return merged
 
+    # ---------- 英语词典 ----------
+
+    def find_en_dict(self):
+        """声库里英语词典的路径（有就说明能唱英语）；只查文件在不在，不解析。
+
+        `dsdur/dsdict-en.yaml` 优先；只有一份 `dsdict.yaml` 时，先看它到底是不是英语词典
+        （欲音ルコ这类日语声库的 dsdict.yaml 里也有 `Edge`/`breath` 这种英文拼写条目，
+        但音素是日语写法，不能拿来当英语词典用）。
+        """
+        path = self.voicebank_dir / "dsdur/dsdict-en.yaml"
+        if path.is_file():
+            return path
+        plain = self.voicebank_dir / "dsdur/dsdict.yaml"
+        if plain.is_file() and self.has_en_entries(plain):
+            return plain
+        return None
+
+    def has_en_entries(self, path):
+        """判断一份词典是不是英语词典：看前 300 条里有几条带 ARPABET 双字母元音。
+
+        日语词典的音素是 `a`/`i`/`cl`/`N` 这种写法，没有 `ih`/`ow`，所以不会误判。
+        """
+        checked = 0
+        hits = 0
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for grapheme, phones in iter_en_entries(handle):
+                    if not phones or not en_word(grapheme):
+                        continue
+                    checked += 1
+                    if any(arpabet_base(p) in EN_ARPA_VOWELS for p in phones):
+                        hits += 1
+                    if checked >= 300:
+                        break
+        except OSError as exc:
+            print(f"英语词典预检失败 {path.name}: {exc}", file=sys.stderr)
+            return False
+        return hits >= 10 and hits >= checked * 0.3
+
+    def load_en_small_dict(self):
+        """小英语词典整份读进 en_cache（几十 KB～几 MB，条目不多，一次就够）。"""
+        self.en_full = True
+        found = {}
+        try:
+            with self.en_dict_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for grapheme, phones in iter_en_entries(handle):
+                    key = en_word(grapheme)
+                    if not key or key in found:
+                        continue
+                    mapped = self.en_phones(phones)
+                    if mapped:
+                        found[key] = mapped
+        except OSError as exc:  # 词典读不了不该拖垮引擎，最多英语唱不出来
+            print(f"英语词典读取失败 {self.en_dict_path.name}: {exc}", file=sys.stderr)
+        self.en_cache.update(found)
+        print(f"英语词典: {len(found)} 条（{self.en_dict_path.name}）", file=sys.stderr)
+
+    def scan_en_dict(self, wanted):
+        """大词典只挑歌词里出现的词：流式扫一遍（绮萱 27 MB 约 0.5 s），不做整份解析。
+
+        命中的词记音素，没命中的词记 None —— 下一句再来同一个词就不必重扫。
+        """
+        found = {}
+        try:
+            with self.en_dict_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for grapheme, phones in iter_en_entries(handle):
+                    key = en_word(grapheme)
+                    if not key or key in found or key not in wanted:
+                        continue
+                    mapped = self.en_phones(phones)
+                    if mapped:
+                        found[key] = mapped
+        except OSError as exc:
+            print(f"英语词典读取失败 {self.en_dict_path.name}: {exc}", file=sys.stderr)
+        self.en_cache.update(found)
+        for word in wanted:
+            self.en_cache.setdefault(word, None)
+        print(f"英语词典扫描: 命中 {len(found)}/{len(wanted)} 个词", file=sys.stderr)
+
+    def map_en_phone(self, phoneme):
+        """词典里的一个音素 → 声库音素表里的写法；查不到返回空串。
+
+        三种声库三种写法：绮萱是全前缀（`en/aa`）、Hanami 这类 OpenUtau 英语声库是裸
+        ARPABET（`aa`）、多语言声库还可能只收 `zh/`。按「原样 → en/ 前缀 → 去前缀 → 别名」试。
+        """
+        text = str(phoneme or "").strip()
+        if not text:
+            return ""
+        if self.phoneme_set is None:
+            return text
+        base = arpabet_base(text)
+        candidates = [text, text.lower(), f"en/{base}", base]
+        alias = EN_PHONEME_ALIASES.get(base)
+        if alias:
+            candidates.extend([f"en/{alias}", alias])
+        for candidate in candidates:
+            if candidate and candidate in self.phoneme_set:
+                return candidate
+        return ""
+
+    def en_phones(self, raw):
+        """词典里的一条音素列表 → 声库写法；有一个查不到就整条不要（免得 ONNX 报 KeyError）。"""
+        mapped = [self.map_en_phone(p) for p in raw]
+        if not mapped or any(not p for p in mapped):
+            return []
+        return mapped
+
+    def en_fallback_phone(self):
+        """未知词的兜底音素：挑一个声库里有的元音，整词只唱一个音符。
+
+        宁可含糊一点也不能把词吞掉，更不能让 ONNX 收到表外音素直接报错。
+        """
+        for base in ("ax", "ah", "aa", "uh", "a", "e", "i", "o", "u"):
+            mapped = self.map_en_phone(f"en/{base}")
+            if mapped:
+                return mapped
+        return ""
+
+    def en_lookup(self, words):
+        """一批歌词单词 → {词: 音素}；词典里没有的词用兜底音素补上。"""
+        wanted = [word for word in words if word]
+        if self.en_small:
+            if not self.en_full:
+                self.load_en_small_dict()
+        else:
+            missing = {word for word in wanted if word not in self.en_cache}
+            if missing:
+                self.scan_en_dict(missing)
+        fallback = self.en_fallback_phone()
+        result = {}
+        for word in wanted:
+            phones = self.en_cache.get(word)
+            if phones:
+                result[word] = list(phones)
+            elif fallback:
+                result[word] = [fallback]
+        return result
+
     # ---------- 词 → 音素 ----------
 
     def ja_phonemes(self, grapheme):
@@ -347,6 +590,59 @@ class Singer:
             units.append((ch, phones))
         return units
 
+    def en_syllables(self, phones):
+        """音素串 → 音节：一个音节一个元音核（唱一个音符），词尾辅音留在最后一个音节。
+
+        切在元音处：元音之后到下一个元音之间的辅音算下一个音节的声母（英语更像
+        "a-bout" 那种切法），末尾剩下的辅音自然留在最后一音节，不会被吞。
+        整个词一个元音都没有（词典里的怪词）就退化成单个音节，整词一个音符。
+        """
+        syllables = []
+        current = []
+        has_vowel = False
+        for phoneme in phones:
+            if has_vowel and arpabet_base(phoneme) in EN_VOWELS:
+                syllables.append(current)
+                current = [phoneme]
+                continue
+            current.append(phoneme)
+            if arpabet_base(phoneme) in EN_VOWELS:
+                has_vowel = True
+        if current:
+            syllables.append(current)
+        return syllables
+
+    def en_units(self, phrase):
+        """英语切分：按空格分词，一个词按音节拆成多个音符；词典里没有的词兜底成一个音符。"""
+        words = [en_word(match.group(0)) for match in EN_WORD.finditer(phrase)]
+        words = [word for word in words if word]
+        if not words:
+            return []
+        lookup = self.en_lookup(words)
+        units = []
+        for word in words:
+            phones = lookup.get(word) or []
+            if not phones:
+                continue
+            for syllable in self.en_syllables(phones):
+                units.append((word, syllable))
+        return units
+
+    def phrase_units(self, phrase):
+        """一句歌词 → ([(grapheme, phones)], lang)。
+
+        假名 → 日语词典；纯拉丁字母（不含汉字）→ 英语词典；其余按汉字逐字查拼音。
+        """
+        if self.ja_dict_path and KANA.search(phrase):
+            return self.ja_units(phrase), "ja"
+        if self.en_dict_path and not HAN.search(phrase) and EN_WORD.search(phrase):
+            return self.en_units(phrase), "en"
+        return [
+            (char, phones)
+            for char, phones in ((c, self.syllable_phonemes(c)) for c in HAN.findall(phrase))
+            if phones
+        ], "zh"
+
     def syllable_phonemes(self, char):
         """一个汉字 → 音素列表；不在词典或声库音素表里就返回空（这个字不唱）。
 
@@ -371,7 +667,7 @@ class Singer:
     # ---------- 旋律 ----------
 
     def build_notes(self, lyrics, bpm, key_shift, scale, seed, max_seconds):
-        """按句生成旋律；每字一个音符，句间插一个 SP 休止。返回 (notes, text)。"""
+        """按句生成旋律；每字/每音节一个音符，句间插一个 SP 休止。返回 (notes, text, lang)。"""
         import random
 
         beat = 60.0 / max(40, bpm)
@@ -383,19 +679,14 @@ class Singer:
         notes = []
         sung_text = []
         total = 0.0
+        # 整首歌只给一个 lang（diffsinger_utau 的五个阶段都吃同一个）：按音符数最多的语言。
+        lang_counts = {}
 
         for phrase in phrases:
-            # 声库带假名词典、且这句里出现假名 → 按日语切；否则按汉字逐字查拼音。
-            if self.ja_dict_path and KANA.search(phrase):
-                units = self.ja_units(phrase)
-            else:
-                units = [
-                    (char, phones)
-                    for char, phones in ((c, self.syllable_phonemes(c)) for c in HAN.findall(phrase))
-                    if phones
-                ]
+            units, lang = self.phrase_units(phrase)
             if not units:
                 continue
+            lang_counts[lang] = lang_counts.get(lang, 0) + len(units)
             # 每个乐句在五声音阶里走一段：起点随机，步进 ±1/0，靠拢中间音。
             degree = rng.randrange(len(scale_steps))
             octave = 4
@@ -431,11 +722,12 @@ class Singer:
         # 去掉结尾多出来的休止
         while notes and notes[-1]["rest"]:
             notes.pop()
-        return notes, "".join(sung_text)
+        lang = max(lang_counts, key=lang_counts.get) if lang_counts else "zh"
+        return notes, "".join(sung_text), lang
 
     # ---------- DS 段落 ----------
 
-    def build_ds(self, notes, text):
+    def build_ds(self, notes, text, lang="zh"):
         ph_seq = []
         ph_num = []
         note_seq = []
@@ -448,6 +740,7 @@ class Singer:
         return {
             "offset": 0,
             "text": text,
+            "lang": lang,
             "ph_seq": " ".join(ph_seq),
             "ph_num": " ".join(str(n) for n in ph_num),
             "note_seq": " ".join(note_seq),
@@ -456,6 +749,14 @@ class Singer:
         }
 
     # ---------- 唱 ----------
+
+    def pick_lang(self, lang):
+        """声库的语言表里没有这门语言时退回声库默认，免得 diffsinger_utau 里 assert 直接炸。"""
+        content = getattr(getattr(self.pred, "dsvariance", None), "languages", None)
+        table = getattr(content, "content", None)
+        if table and lang not in table:
+            return next(iter(table))
+        return lang
 
     def sing(self, job):
         from diffsinger_utau.voice_bank.commons.ds_reader import DSReader
@@ -471,11 +772,14 @@ class Singer:
         max_seconds = float(job.get("maxSeconds") or 60)
         out = Path(job["out"])
 
-        notes, text = self.build_notes(lyrics, bpm, key_shift, scale, seed, max_seconds)
+        notes, text, lang = self.build_notes(lyrics, bpm, key_shift, scale, seed, max_seconds)
         if not notes:
-            raise ValueError("没有可唱的字：中文要汉字且声库音素表里有读音，日语要假名且声库自带假名词典")
+            raise ValueError(
+                "没有可唱的字：中文要汉字且声库音素表里有读音，"
+                "日语要假名且声库自带假名词典，英语要声库自带英语词典（dsdur/dsdict-en.yaml）"
+            )
 
-        ds = DSReader.DSSection(self.build_ds(notes, text))
+        ds = DSReader.DSSection(self.build_ds(notes, text, lang))
         out.parent.mkdir(parents=True, exist_ok=True)
         work = out.parent / f"{out.stem}.work"
         work.mkdir(parents=True, exist_ok=True)
@@ -486,7 +790,7 @@ class Singer:
 
         results = self.pred.predict_full_pipeline(
             ds=ds,
-            lang="zh",
+            lang=self.pick_lang(lang),
             speaker=speaker,
             key_shift=0,  # 旋律里已经按 keyShift 生成
             pitch_steps=int(job.get("pitchSteps") or 10),
@@ -512,6 +816,7 @@ class Singer:
             "seconds": round(seconds, 3),
             "notes": len(notes),
             "sungChars": len(text),
+            "lang": lang,
             "sampleRate": int(self.pred.dsvocoder.sample_rate),
         }
 

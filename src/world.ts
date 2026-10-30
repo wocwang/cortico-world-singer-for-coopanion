@@ -33,13 +33,35 @@ import { VOCODER_PAGE, VOICEBANK_PAGE, VOICEBANK_VERSION } from './catalog.ts';
 const WORKER_SCRIPT = fileURLToPath(new URL('./python/worker.py', import.meta.url));
 /** 告诉模型「在 QQ 里怎么点歌」的环境提示词模板。 */
 const ENV_PROMPT_PATH = fileURLToPath(new URL('../prompts/env.md', import.meta.url));
-const VERSION = '0.1.9';
+const VERSION = '0.1.12';
+/** 换声库时最多等旧引擎把排队的句子唱完（超时也照样切，别把用户卡死）。 */
+const SWITCH_DRAIN_MS = 180_000;
 
 export interface SingerWorldOptions {
   cfg: SingerConfigSection;
   dataDir: string;
   /** `<部署根>/runtimes`；自动找 gpt-sovits 运行时用。 */
   runtimesRoot: () => string;
+  /** 建引擎的工厂；单测里注入假引擎用，不传就按配置建真的 `SingerEngine`。 */
+  createEngine?: (init: EngineInit) => SingerEngine;
+}
+
+export interface EngineInit {
+  pythonPath: string;
+  voicebankDir: string;
+  scriptPath: string;
+  runtimeDir?: string;
+}
+
+/** 配置 → 实际使用的声库目录：选了「声库总目录」里的某个库就用它，否则用单独的「声库目录」。 */
+export function resolveVoicebankDir(
+  cfg: Pick<SingerConfigSection, 'voicebank' | 'voicebankDir' | 'voicebanksDir'>,
+  dataDir: string,
+): string {
+  const banksDir = cfg.voicebanksDir.trim() || join(dataDir, 'voicebanks');
+  return cfg.voicebank.trim()
+    ? join(banksDir, cfg.voicebank.trim())
+    : cfg.voicebankDir.trim() || join(dataDir, 'voicebank');
 }
 
 /** 在 `<runtimesRoot>/gpt-sovits/<版本>/<档>/runtime/python.exe` 里挑一个可用运行时。
@@ -85,6 +107,8 @@ export class SingerWorld implements World {
   private server: SingServerHandle | null = null;
   private starting: Promise<void> | null = null;
   private stopped = true;
+  /** 推理服务（引擎 + 本机接口）是否开着：面板可以手动停掉（还内存），World 仍挂载。 */
+  private serviceOn = false;
   private launchDetail = '';
   private pythonPath = '';
   private runtimeDir = '';
@@ -95,6 +119,15 @@ export class SingerWorld implements World {
   private activeBank: BankInfo | null = null;
   /** 实际用的运行时档（`''` 表示自备运行时，判断不了）。 */
   private runtimeTier: 'cuda' | 'cpu' | '' = '';
+  /** 正在换声库：新引擎载入中的目标目录名。 */
+  private pendingBank = '';
+  private switching = false;
+  /** 换声库失败的原因（面板显示，旧引擎继续用）。 */
+  private bankSwitchError = '';
+  /** 上次换声库失败的目录：配置还指它就别每句都白等几秒再重试。 */
+  private failedBank: { dir: string; detail: string } | null = null;
+  /** 演唱串行链：同一时刻只唱一句，换声库也排在这一句唱完之后。 */
+  private singChain: Promise<unknown> = Promise.resolve();
   /** 最近一次演唱的结果，面板渲染用。 */
   private lastSing: {
     at: number; ms: number; bytes: number; seconds: number; notes: number;
@@ -113,7 +146,7 @@ export class SingerWorld implements World {
         ? '正在启动（载入声库）'
         : st?.phase === 'error'
           ? `出错：${st.detail || this.launchDetail || '未知原因'}`
-          : '未启动（插件没启用，或引擎已经停掉）';
+          : '未启动（在「服务」页点「启动服务」）';
     return { 'singer.state': state };
   }
 
@@ -156,11 +189,10 @@ export class SingerWorld implements World {
     this.stopped = false;
     this.launchDetail = '';
     this.setup();
-    // 就绪可能要十几秒（载入五个 ONNX）；先让 World 挂上，接口立刻能答 `ready=false`。
-    this.bootEngine();
+    // 挂载时默认拉起推理服务；面板上可以手动停掉再启回来（例如省内存）。
+    this.startService();
     // 已有的派生 venv 不必等用户点安装：后台探一次，面板直接显示就绪。
     void this.venv?.check();
-    if (this.opts.cfg.httpApi) void this.startHttp();
   }
 
   /** 按当前配置解析路径并（重）建 installer / venv / engine；改推理档后重启引擎会再走一遍。 */
@@ -180,17 +212,54 @@ export class SingerWorld implements World {
       basePython: paths.runtimeDir ? join(paths.runtimeDir, 'runtime', 'python.exe') : '',
       log: this.log ?? undefined,
     });
-    this.engine = new SingerEngine({
-      pythonPath: paths.pythonPath,
-      voicebankDir: paths.voicebankDir,
+    // 重启/重新解析路径后，上次换声库的失败记录一并清掉（下一句会重新试一次）。
+    this.failedBank = null;
+    this.bankSwitchError = '';
+    this.pendingBank = '';
+    this.switching = false;
+    this.engine = this.buildEngine(paths.voicebankDir);
+  }
+
+  /** 按当前 python / 运行时建一个引擎；单测用注入的工厂，生产里就是 `SingerEngine`。 */
+  private buildEngine(voicebankDir: string): SingerEngine {
+    const init: EngineInit = {
+      pythonPath: this.pythonPath,
+      voicebankDir,
       scriptPath: WORKER_SCRIPT,
-      runtimeDir: paths.runtimeDir || undefined,
-      log: this.log ?? undefined,
-    });
+      runtimeDir: this.runtimeDir || undefined,
+    };
+    if (this.opts.createEngine) return this.opts.createEngine(init);
+    return new SingerEngine({ ...init, log: this.log ?? undefined });
+  }
+
+  /**
+   * 面板「启动服务」：拉起常驻引擎；接口开着就同时监听。
+   * 引擎已经就绪时什么也不做；刚从「停止服务」回来时会重新走一遍载入（约 4–11 秒）。
+   */
+  private startService(): void {
+    if (this.stopped) return;
+    this.serviceOn = true;
+    this.launchDetail = '';
+    // 手动启停等同一次重试：上次换声库失败的目录可以再试一次。
+    this.failedBank = null;
+    this.bootEngine();
+    if (this.opts.cfg.httpApi && !this.server) void this.startHttp();
+  }
+
+  /** 面板「停止服务」：停引擎、关接口；World 仍挂着，下次点「启动服务」再回来。 */
+  private async stopService(): Promise<void> {
+    this.serviceOn = false;
+    const server = this.server;
+    this.server = null;
+    await server?.close();
+    await this.engine?.stop();
+    this.launchDetail = '';
+    this.bankSwitchError = '';
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.serviceOn = false;
     this.installer?.cancel();
     this.venv?.cancel();
     const server = this.server;
@@ -202,13 +271,16 @@ export class SingerWorld implements World {
     this.starting = null;
   }
 
-  /** 拉起/重拉引擎；失败原因进 `launchDetail`，面板与接口据此解释。 */
+  /** 拉起/重拉引擎；失败原因进 `launchDetail`，面板与接口据此解释。服务关着时不起。 */
   private bootEngine(): void {
+    if (!this.serviceOn) return;
     const engine = this.engine;
     if (!engine) return;
     this.starting = engine.start()
       .then(() => { this.launchDetail = ''; })
       .catch((err: unknown) => {
+        // 面板刚点了「停止服务」就别再记一条失败：引擎是被我们主动停的。
+        if (!this.serviceOn) return;
         this.launchDetail = err instanceof Error ? err.message : String(err);
         this.log?.warn('唱歌引擎启动失败', { err: this.launchDetail });
       });
@@ -247,9 +319,7 @@ export class SingerWorld implements World {
       // 声库：选了「声库总目录」里的某个库就用它，否则沿用单独的「声库目录」。
       // 解压后的绮萱声库约 451 MB，首次在面板里安装。
       banksDir: this.opts.cfg.voicebanksDir.trim() || join(dataDir, 'voicebanks'),
-      voicebankDir: this.opts.cfg.voicebank.trim()
-        ? join(this.opts.cfg.voicebanksDir.trim() || join(dataDir, 'voicebanks'), this.opts.cfg.voicebank.trim())
-        : this.opts.cfg.voicebankDir.trim() || join(dataDir, 'voicebank'),
+      voicebankDir: resolveVoicebankDir(this.opts.cfg, dataDir),
     };
   }
 
@@ -268,7 +338,7 @@ export class SingerWorld implements World {
         token: this.opts.cfg.httpToken,
         deps,
       });
-      if (this.stopped) { await handle.close(); return; }
+      if (this.stopped || !this.serviceOn) { await handle.close(); return; }
       this.server = handle;
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
@@ -290,9 +360,9 @@ export class SingerWorld implements World {
       method: 'POST',
       path: '/sing',
       contentType: 'application/json',
-      note: '歌词进，wav 出；中文写汉字、日语写假名（需日语声库），标点断句，其余字符不唱。旋律由程序按调式自动生成。',
+      note: '歌词进，wav 出；中文写汉字、日语写假名（需日语声库）、英语写单词（需带英语词典的声库），标点断句，其余字符不唱。旋律由程序按调式自动生成。配置里换了声库，下一句自动换引擎，不用重启。',
       params: {
-        lyrics: { type: 'string', required: true, maxLength: LYRICS_MAX, description: '要唱的歌词，例如「晚风吹过旧时光」；日语写假名' },
+        lyrics: { type: 'string', required: true, maxLength: LYRICS_MAX, description: '要唱的歌词，例如「晚风吹过旧时光」；日语写假名，英语用空格分词' },
         bpm: { type: 'integer', default: cfg.bpm, min: 60, max: 200, description: '速度；每字半拍、句末一字一拍' },
         keyShift: { type: 'integer', default: cfg.keyShift, min: -12, max: 12, description: '移调（半音），正数更高' },
         scale: { type: 'string', default: cfg.scale, enum: ['major', 'minor'], description: '旋律调式' },
@@ -320,7 +390,62 @@ export class SingerWorld implements World {
   }
 
   /** 一次演唱：临时 wav 进、内存 wav 出；`save=1` 时另存到 `<dataDir>/out`。 */
-  private async sing(job: SingJob): Promise<SingOutcome> {
+  private sing(job: SingJob): Promise<SingOutcome> {
+    // 串行：同一时刻只唱一句；配置里换了声库，也排在这一句唱完之后再换。
+    const run = (): Promise<SingOutcome> => this.singOnce(job);
+    const next = this.singChain.then(run, run);
+    this.singChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /** 配置里的声库变了就地重建引擎；音色每句现读，不用重启。 */
+  private async ensureBank(): Promise<void> {
+    if (this.stopped || !this.serviceOn || !this.engine) return;
+    const target = resolveVoicebankDir(this.opts.cfg, this.opts.dataDir);
+    if (!target || target === this.voicebankDir) return;
+    // 这个目录刚失败过：配置没再改就不要再白等几秒重试，直接沿用旧声库继续唱。
+    if (this.failedBank?.dir === target) return;
+    await this.switchEngine(target);
+  }
+
+  /** 换声库：新引擎载入就绪后才替换旧的，失败就停掉新的、继续用上一个（唱歌不挂）。 */
+  private async switchEngine(dir: string): Promise<void> {
+    const old = this.engine;
+    const name = basename(dir);
+    this.switching = true;
+    this.pendingBank = name;
+    this.bankSwitchError = '';
+    let next: SingerEngine | null = null;
+    try {
+      // 旧引擎还在唱就先等它唱完（world 里已经串行，这里兜住别处直接调引擎的情况）。
+      await drain(old);
+      if (!this.serviceOn) return;
+      next = this.buildEngine(dir);
+      await next.start();
+      if (this.stopped || !this.serviceOn) { await next.stop(); return; }
+      this.engine = next;
+      this.voicebankDir = dir;
+      this.activeBank = bankInfo(dir);
+      this.launchDetail = '';
+      // 新引擎就绪期间服务被手动停了：别把新引擎留在后台。
+      if (this.stopped || !this.serviceOn) { await next.stop(); return; }
+      this.log?.info('唱歌引擎换声库完成', { voicebank: name, ms: next.state().startMs });
+      await old?.stop();
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      this.failedBank = { dir, detail: why };
+      this.bankSwitchError = `换声库失败（${name}）：${why}`;
+      this.log?.warn('换声库失败，继续用上一个声库', { voicebank: name, err: why });
+      await next?.stop().catch(() => undefined);
+    } finally {
+      this.switching = false;
+      this.pendingBank = '';
+    }
+  }
+
+  private async singOnce(job: SingJob): Promise<SingOutcome> {
+    if (!this.serviceOn) throw new SingerError('unavailable', '推理服务未启动：在「服务」页点「启动服务」');
+    await this.ensureBank();
     const engine = this.engine;
     if (!engine) throw new SingerError('unavailable', '唱歌引擎未启动');
     const tmpDir = join(this.opts.dataDir, 'tmp');
@@ -393,10 +518,12 @@ export class SingerWorld implements World {
   }
 
   private async invoke(panel: string, method: string, args: unknown[] = []): Promise<unknown> {
-    if (method === 'state' || method === 'install' || method === 'cancel' || method === 'restart') {
+    if (method === 'state' || method === 'install' || method === 'cancel' || method === 'restart' || method === 'start' || method === 'stop') {
       if (method === 'install') this.startSetup();
       else if (method === 'cancel') { this.runtime?.cancel(); this.installer?.cancel(); this.venv?.cancel(); }
       else if (method === 'restart') void this.restartEngine();
+      else if (method === 'start') this.startService();
+      else if (method === 'stop') await this.stopService();
       return this.status();
     }
     if (method === 'sing') return this.singFromPanel(args);
@@ -410,12 +537,18 @@ export class SingerWorld implements World {
     return {
       phase: st?.phase ?? 'stopped',
       ready: this.health().ready,
+      /** 推理服务开着没有：面板据此切换「启动服务 / 停止服务」按钮。 */
+      service: this.serviceOn,
       device: st?.device ?? null,
       voicebank: st?.voicebank ?? null,
       sampleRate: st?.sampleRate ?? null,
       speakers: st?.speakers ?? [],
       startMs: st?.startMs ?? null,
       queue: this.engine?.queue() ?? 0,
+      // 换声库的进度与结果：`pendingBank` 是新引擎载入中的目标，失败时 `switchError` 给原因。
+      switching: this.switching,
+      pendingBank: this.pendingBank || null,
+      switchError: this.bankSwitchError || null,
       port: this.server?.port ?? null,
       detail: st?.detail ?? this.launchDetail,
       tail: this.engine?.output() ?? [],
@@ -485,15 +618,23 @@ export class SingerWorld implements World {
       if (this.stopped) return;
       const state = installer.status();
       this.log?.info('DiffSinger 声库安装结束', { phase: state.phase, detail: state.detail });
-      if (state.phase === 'ready' && !this.engine?.ready()) this.bootEngine();
+      if (state.phase === 'ready' && this.serviceOn && !this.engine?.ready()) this.bootEngine();
     })();
   }
 
   private async restartEngine(): Promise<void> {
+    if (this.stopped) return;
+    // 点「重启引擎」就等于要把服务开着：停了也能从这里启回来。
+    this.serviceOn = true;
     await this.engine?.stop();
     if (this.stopped) return;
+    // 接口的端口 / 令牌 / 开关可能一起改过：先关掉，按当前配置重新监听。
+    const server = this.server;
+    this.server = null;
+    await server?.close();
     // 可能改过推理档/运行时/声库目录：按当前配置重建 venv 与引擎（venv 的 base 变了会自动重建）。
     this.setup();
+    if (this.opts.cfg.httpApi) void this.startHttp();
     const venv = this.venv;
     if (!venv) return;
     await venv.check();
@@ -511,6 +652,7 @@ export class SingerWorld implements World {
   /** 面板里唱一次：走和 HTTP 接口同一套参数校验，回 `$binary` 让浏览器直接试听。 */
   private async singFromPanel(args: unknown[]): Promise<unknown> {
     const raw = (args[0] && typeof args[0] === 'object' ? args[0] : {}) as Record<string, unknown>;
+    if (!this.serviceOn) throw new SingerError('unavailable', '推理服务未启动：先在「服务」页点「启动服务」');
     const engine = this.engine;
     if (!engine) throw new SingerError('unavailable', '唱歌引擎未启动');
     // 先按接口同一套规则校验参数，填错了立刻能看到原因。
@@ -523,6 +665,15 @@ export class SingerWorld implements World {
     if (!engine.ready()) throw new SingerError('unavailable', engine.state().detail ?? '唱歌引擎未就绪');
     const out = await this.sing(job);
     return { $binary: { mime: 'audio/wav', base64: out.audio.toString('base64') } };
+  }
+}
+
+/** 等旧引擎把排队的句子唱完；最多等 `SWITCH_DRAIN_MS`，超时也照样切（别把用户卡死）。 */
+async function drain(engine: SingerEngine | null): Promise<void> {
+  if (!engine) return;
+  const deadline = Date.now() + SWITCH_DRAIN_MS;
+  while (engine.queue() > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
 }
 

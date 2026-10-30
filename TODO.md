@@ -34,11 +34,24 @@
   缺 `prefix`/`tone_ranges` 的 `subbanks`。实测欲音ルコ♀ DiffSinger v2.00：
   `さくら さくら やよいのそら` → 5.1 s 音频，CPU 推理 4.5 s，引擎载入 6 s。
   声库留在 `D:\models\diffsinger-voicebanks\yokune-ruko-f-diffsinger-v2.00`（解压后）。
-- **英语未做**：还需 CMU/ARPABET 表 + `dsdict-en.yaml` 解析，以及逐词切分；先确认 Hanami Beta2 能不能被
-  `diffsinger_utau 0.3.8` 跑通（它是 reflow 训练 + 自研 `titaniagan` 声码器，风险较高）。
+- **英语已打通（0.1.10，2026-10-29）**：按空格分词，查声库自带的 `dsdur/dsdict-en.yaml`（也认单一 `dsdict.yaml`
+  里的英语条目），CMU/ARPABET 音标按「原样 → `en/前缀` → 去前缀 → 别名（`axr→er`、`ix→ih`…）」落到声库音素表；
+  每个词按元音核切音节、词尾辅音留末音节，未知词兜底 1 个音符的弱元音（整词给一个音符，不崩）。
+  大词典（绮萱 27 MB / 26.8 万条）流式扫、按歌词词集缓存（约 0.45 s）。实测绮萱 v2.7.0：
+  `twinkle twinkle little star, how I wonder what you are` → 5.341 s 音频、15 音符、推理 6.2 s、载入 2.8 s。
+  Hanami Beta2（reflow + 自研 `titaniagan`）缺 `dsvariance/`，`diffsinger_utau 0.3.8` 载入即报
+  `FileNotFoundError … dsvariance\dsconfig.yaml`，跑不通；詩音マコト ENG 在 BOOTH 需 pixiv 登录，未下。
 - **多声库切换已做（0.1.6）**：配置 `voicebanksDir`（总目录）+ `voicebank`（选项带「名称（语言 · 音色）」）
   + `voiceColor`（Normal / Soft…），面板列出候选并标 ● 当前；四个预测阶段按后缀重映射音色名。
-  仍需手动点「重启引擎」生效（热切换要改成 world 内重建 engine）。
+- **声库热切换已做（0.1.11，2026-10-29）**：world 内自己重建 engine，下一句直接唱新声库，不用点「重启引擎」；
+  演唱串行化，正在唱的那句不打断，切换排到当前句之后（最多等 3 分钟）；新引擎起不来就退回上一个声库，
+  `switchError` 给出可读原因并记住失败不重试；只换音色不重建。实测绮萱（`twinkle twinkle little star`
+  → 2.519 s / 3630 ms）→ 欲音ルコ（`さくら さくら やよいのそら` → 4.075 s / 7439 ms，含新引擎载入 3320 ms），
+  `switchError = null`。
+- **推理服务手动启停已做（0.1.12，2026-10-30）**：面板「启动服务 / 停止服务」，停掉只关引擎与本机接口
+  （World 仍挂载，约 1.3 GB 内存释放），再启动按当前配置重新载入；「重启引擎」也能把停掉的服务拨回来。
+  配置 `x-hot` 按实际生效时机修正（声库/音色热改，路径/端口/令牌标「重启生效」），
+  `describe.json` 补上环境提示词全文；`tests/service.test.ts` 5 个用例。
 - **共享运行时可按需下载（0.1.8 / RVC 0.3.5）**：没有 `runtimes/gpt-sovits/<版本>/<档>` 时，
   唱歌下 CPU 档（约 1 GB）、RVC 按 `auto` 检测 NVIDIA 下显卡档（约 4.1 GB）或 CPU 档，
   布局与 gpt-sovits 一致，三个插件共用同一份。下载→SHA-256→tar 解压→`cortico-runtime.json` 有单测覆盖；

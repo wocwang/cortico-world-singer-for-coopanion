@@ -23,6 +23,8 @@ export interface BankInfo {
 const KANA = /[\u3041-\u309f\u30a1-\u30ff]/;
 /** 假名词典的上限，与 worker 的 `JA_DICT_MAX_BYTES` 一致。 */
 const JA_DICT_MAX_BYTES = 4 * 1024 * 1024;
+/** ARPABET 的双字母元音，与 worker 的 `EN_ARPA_VOWELS` 一致：用来认出英语词典。 */
+const EN_ARPA_VOWELS = 'aa|ae|ah|ao|aw|ay|ax|eh|er|ey|ih|iy|ow|oy|uh|uw';
 
 /** 文本文件按 UTF-8 读，失败按 Shift-JIS 读（日语老声库的元数据是 cp932）。 */
 function readText(path: string): string {
@@ -68,25 +70,39 @@ export function readColors(root: string): string[] {
   return colors;
 }
 
-/** 语言：只看引擎真能吃下的——中文（拼音表）与日语（声库里的小词名词典）；英语还没接。 */
-function readLanguages(root: string): string[] {
+/** 单一 `dsdict.yaml` 里有没有成规模的英语条目（前 300 条里 30% 以上带 ARPABET 双字母元音）。 */
+function hasEnEntries(text: string): boolean {
+  let checked = 0;
+  let hits = 0;
+  const chunks = text.split(/(?=\n-\s*(?:grapheme:|\{grapheme:))/).slice(1, 301);
+  for (const chunk of chunks) {
+    if (!/grapheme:/.test(chunk) || !/phonemes:/.test(chunk)) continue;
+    checked += 1;
+    const lower = chunk.toLowerCase();
+    if (new RegExp(`(?:^|[\\s\\[,/|-])(${EN_ARPA_VOWELS})(?=$|[\\s\\],/0-9])`).test(lower)) hits += 1;
+  }
+  return hits >= 10 && hits >= checked * 0.3;
+}
+
+/** 语言：只看引擎真能吃下的——中文（拼音表）、日语（声库自带小假名词典）、英语（声库自带英语词典）。 */
+export function readLanguages(root: string): string[] {
   const dsdur = join(root, 'dsdur');
   const langs: string[] = [];
+  const enDict = join(dsdur, 'dsdict-en.yaml');
   const jaDict = join(dsdur, 'dsdict-ja.yaml');
+  const zhDict = join(dsdur, 'dsdict-zh.yaml');
   const plain = join(dsdur, 'dsdict.yaml');
+  if (existsSync(zhDict)) langs.push('zh');
   // 多语言声库的 dsdict-ja.yaml 有十几 MB、十几万条，而且不是逐假名的条目，
   // worker 直接不认（解析要一分半）；所以这里也只按「小词典」认日语。
-  if (existsSync(jaDict)) {
-    if (statSync(jaDict).size <= JA_DICT_MAX_BYTES) langs.push('ja');
-    langs.push('zh');
-    return langs;
-  }
-  if (existsSync(join(dsdur, 'dsdict-zh.yaml'))) langs.push('zh');
+  if (existsSync(jaDict) && statSync(jaDict).size <= JA_DICT_MAX_BYTES) langs.push('ja');
+  if (existsSync(enDict)) langs.push('en');
   if (!langs.length && existsSync(plain)) {
-    // 单一 dsdict.yaml：有假名条目、且不大，就是单语言日语声库（如欲音ルコ）。
-    const size = statSync(plain).size;
+    // 单一 dsdict.yaml 两种可能：小日语声库（假名条目，如欲音ルコ）或英语声库（ARPABET 音素）。
     const text = readText(plain).slice(0, 200_000);
-    langs.push(size <= JA_DICT_MAX_BYTES && KANA.test(text) ? 'ja' : 'zh');
+    if (statSync(plain).size <= JA_DICT_MAX_BYTES && KANA.test(text)) langs.push('ja');
+    else if (hasEnEntries(text)) langs.push('en');
+    else langs.push('zh');
   }
   if (!langs.length) langs.push('zh');
   return langs;

@@ -37,12 +37,19 @@ interface SingDone {
 interface PanelState {
   phase: 'stopped' | 'starting' | 'ready' | 'error';
   ready: boolean;
+  /** 推理服务（引擎 + 本机接口）开着没有；面板据此切换「启动服务 / 停止服务」。 */
+  service: boolean;
   device: string | null;
   voicebank: string | null;
   sampleRate: number | null;
   speakers: string[];
   startMs: number | null;
   queue: number;
+  /** 配置换了声库后，新引擎载入中（`pendingBank` 是目标目录名）。 */
+  switching?: boolean;
+  pendingBank?: string | null;
+  /** 换声库失败的原因；失败时仍在用上一个声库。 */
+  switchError?: string | null;
   port: number | null;
   detail: string;
   tail: string[];
@@ -134,9 +141,11 @@ const servicePanel: WebUiPanel = {
 
     const installBtn = ui.button(t.install, { variant: 'primary', size: 'sm', onClick: () => void call('install') });
     const cancelBtn = ui.button(t.cancel, { size: 'sm', onClick: () => void call('cancel') });
+    const startBtn = ui.button(t.startService, { variant: 'primary', size: 'sm', onClick: () => void call('start') });
+    const stopBtn = ui.button(t.stopService, { size: 'sm', onClick: () => void call('stop') });
     const restartBtn = ui.button(t.restart, { size: 'sm', onClick: () => void call('restart') });
     const acts = ui.actions();
-    acts.append(installBtn, cancelBtn, restartBtn);
+    acts.append(installBtn, cancelBtn, startBtn, stopBtn, restartBtn);
 
     const log = ui.h('pre', 'sn-log');
     log.hidden = true;
@@ -155,10 +164,17 @@ const servicePanel: WebUiPanel = {
     function render(s: PanelState): void {
       state = s;
       // 引擎
-      setPill(engineRow.pill, t[phaseKey(s.phase)], toneOf(s.phase));
+      setPill(
+        engineRow.pill,
+        !s.service ? t.stopped : s.switching ? t.working : t[phaseKey(s.phase)],
+        !s.service ? 'off' : s.switching || s.switchError ? 'warn' : toneOf(s.phase),
+      );
       const started = s.phase === 'ready' && s.startMs ? t.startedIn(Math.round(s.startMs / 1000)) : '';
-      engineRow.detail.textContent = [s.ready ? s.device ?? '' : s.detail, started].filter(Boolean).join(' · ');
-      restartBtn.disabled = s.phase === 'starting';
+      const switching = s.switching && s.pendingBank ? t.switchingBank(s.pendingBank) : '';
+      const switchFailed = !s.switching && s.switchError ? t.bankSwitchFailed(s.switchError) : '';
+      engineRow.detail.textContent = !s.service
+        ? t.serviceOff
+        : [s.ready ? s.device ?? '' : s.detail, started, switching, switchFailed].filter(Boolean).join(' · ');
       // 依赖（派生 venv）
       setPill(depsRow.pill, t[phaseKey(s.venv.phase)], toneOf(s.venv.phase));
       depsRow.detail.textContent = s.venv.detail
@@ -198,6 +214,13 @@ const servicePanel: WebUiPanel = {
       installBtn.textContent = allReady ? t.install : t.installSize(ui.fmt.bytes(s.install.total ?? 0));
       installBtn.disabled = busy || allReady;
       cancelBtn.hidden = !busy;
+      // 推理服务：停着只露「启动服务」，开着露「停止服务」与「重启引擎」。
+      startBtn.hidden = s.service;
+      stopBtn.hidden = !s.service;
+      restartBtn.hidden = !s.service;
+      startBtn.disabled = busy;
+      stopBtn.disabled = busy;
+      restartBtn.disabled = busy || s.phase === 'starting';
       // 接口
       setPill(apiRow.pill, s.port ? t.apiOn(s.port) : t.apiOff, s.port ? 'on' : 'off');
       apiRow.detail.textContent = s.queue ? t.queueText(s.queue) : '';
@@ -325,7 +348,7 @@ const singPanel: WebUiPanel = {
         applyDefaults(s);
         state = s;
         singBtn.disabled = !s.ready;
-        if (!s.ready && s.detail && !msg.textContent) msg.textContent = s.detail;
+        if (!s.ready && !msg.textContent) msg.textContent = s.service ? s.detail : t.serviceOff;
       } catch (err) { if (!state) msg.textContent = errText(err); }
     };
     void refresh();

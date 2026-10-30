@@ -1,6 +1,6 @@
 {
   "name": "@wocwang/cortico-world-singer-for-coopanion",
-  "version": "0.1.9",
+  "version": "0.1.12",
   "type": "module",
   "description": "Cortico World for Coopanion: sing from lyrics with DiffSinger (Qixuan voicebank) and an optional RVC pass",
   "author": "wocwang",
@@ -48,8 +48,9 @@
     },
     "tags": [
       "voice",
-      "singing",
       "local",
+      "creative",
+      "external-setup",
       "experimental"
     ],
     "webUiClient": "dist/webui.js",
@@ -61,6 +62,7 @@
     "dist",
     "prompts",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "describe.json"
   ],
