@@ -146,6 +146,13 @@ export class SingerWorld implements World {
   /** 推理服务（引擎 + 本机接口）是否开着：面板可以手动停掉（还内存），World 仍挂载。 */
   private serviceOn = false;
   private launchDetail = '';
+  /** 引擎是「闲置回收」停的（不是用户手动停服务）：下一条请求要能自动拉回来。 */
+  private idleStopped = false;
+  private idleTimer: NodeJS.Timeout | undefined;
+  /** 正在执行 stop() 的那一小段：请求要等它结束再决定是否拉回。 */
+  private idleSleep: Promise<void> | undefined;
+  /** 已排队/正在唱的句数：大于 0 时不排闲置回收。 */
+  private singBusy = 0;
   private pythonPath = '';
   private runtimeDir = '';
   private voicebankDir = '';
@@ -311,6 +318,7 @@ export class SingerWorld implements World {
   private startService(): void {
     if (this.stopped) return;
     this.serviceOn = true;
+    this.idleStopped = false;
     this.launchDetail = '';
     // 手动启停等同一次重试：上次换声库失败的目录可以再试一次。
     this.failedBank = null;
@@ -321,6 +329,8 @@ export class SingerWorld implements World {
   /** 面板「停止服务」：停引擎、关接口；World 仍挂着，下次点「启动服务」再回来。 */
   private async stopService(): Promise<void> {
     this.serviceOn = false;
+    this.idleStopped = false;
+    this.cancelIdle();
     const server = this.server;
     this.server = null;
     await server?.close();
@@ -332,6 +342,7 @@ export class SingerWorld implements World {
   async stop(): Promise<void> {
     this.stopped = true;
     this.serviceOn = false;
+    this.cancelIdle();
     this.player?.cut();
     this.player?.close();
     this.player = null;
@@ -352,7 +363,11 @@ export class SingerWorld implements World {
     const engine = this.engine;
     if (!engine) return;
     this.starting = engine.start()
-      .then(() => { this.launchDetail = ''; })
+      .then(() => {
+        this.launchDetail = '';
+        this.idleStopped = false;
+        this.armIdle();
+      })
       .catch((err: unknown) => {
         // 面板刚点了「停止服务」就别再记一条失败：引擎是被我们主动停的。
         if (!this.serviceOn) return;
@@ -360,6 +375,66 @@ export class SingerWorld implements World {
         this.log?.warn('唱歌引擎启动失败', { err: this.launchDetail });
       });
     void this.starting;
+  }
+
+  /** 闲置回收：到点停掉引擎。服务关着、正在换声库、还有句子在排队时不排期。 */
+  private armIdle(): void {
+    this.cancelIdle();
+    const minutes = Math.max(0, Math.floor(Number(this.opts.cfg.idleMinutes) || 0));
+    if (!minutes || this.stopped || !this.serviceOn) return;
+    const engine = this.engine;
+    if (!engine?.ready() || this.switching) return;
+    if (this.singBusy > 0 || engine.queue() > 0) return;
+    this.idleTimer = setTimeout(() => { void this.sleepIdle(); }, minutes * 60_000);
+    this.idleTimer.unref?.();
+  }
+
+  private cancelIdle(): void {
+    if (!this.idleTimer) return;
+    clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
+  }
+
+  /** 定时器到点：再确认一次没有活，才真正停引擎；停完不关服务，下一条请求可以自动拉回。 */
+  private async sleepIdle(): Promise<void> {
+    this.idleTimer = undefined;
+    if (this.stopped || !this.serviceOn) return;
+    const engine = this.engine;
+    if (!engine?.ready() || engine.queue() > 0 || this.switching || this.singBusy > 0) {
+      this.armIdle();
+      return;
+    }
+    const done = (async (): Promise<void> => {
+      await engine.stop();
+      this.idleStopped = true;
+      this.launchDetail = '引擎已闲置停止，下一条请求会自动启动';
+      this.log?.info('唱歌引擎闲置回收', { idleMinutes: this.opts.cfg.idleMinutes });
+    })();
+    this.idleSleep = done;
+    try {
+      await done;
+    } finally {
+      this.idleSleep = undefined;
+    }
+  }
+
+  /**
+   * 回收后自动拉回：只处理「闲置停」这一种停止。
+   * 手动停服务、未装声库、启动失败都保持原来的 409/未就绪语义，不在这里偷偷重试。
+   */
+  async ensureReady(): Promise<void> {
+    if (this.stopped || !this.serviceOn) return;
+    const engine = this.engine;
+    if (!engine || engine.ready()) return;
+    // 正在执行闲置回收：等 stop() 结束（期间请求排队，不吃 409）。
+    if (this.idleSleep) await this.idleSleep.catch(() => undefined);
+    // 已经在启动中（自动启动或别的请求触发）：一起等，避免并发请求被 409 打回。
+    if (this.starting) await this.starting.catch(() => undefined);
+    if (engine.ready()) return;
+    if (!this.idleStopped || engine.state().phase !== 'stopped') return;
+    this.idleStopped = false;
+    this.bootEngine();
+    await this.starting?.catch(() => undefined);
   }
 
   /** 面板/接口共用：此刻引擎状态。 */
@@ -401,6 +476,7 @@ export class SingerWorld implements World {
   private async startHttp(): Promise<void> {
     const deps: SingDeps = {
       ready: () => !!this.engine?.ready(),
+      ensureReady: () => this.ensureReady(),
       stateText: () => this.engine?.state().detail ?? (this.launchDetail || '唱歌引擎启动中'),
       health: () => this.health(),
       sing: (job) => this.sing(job),
@@ -466,11 +542,17 @@ export class SingerWorld implements World {
 
   /** 一次演唱：临时 wav 进、内存 wav 出；`save=1` 时另存到 `<dataDir>/out`。 */
   private sing(job: SingJob): Promise<SingOutcome> {
+    // 有活就不回收；唱完再重新计时。
+    this.cancelIdle();
+    this.singBusy += 1;
     // 串行：同一时刻只唱一句；配置里换了声库，也排在这一句唱完之后再换。
     const run = (): Promise<SingOutcome> => this.singOnce(job);
     const next = this.singChain.then(run, run);
     this.singChain = next.catch(() => undefined);
-    return next;
+    return next.finally(() => {
+      this.singBusy -= 1;
+      this.armIdle();
+    });
   }
 
   /** 桌宠 / 对话页里唱一句：合成完把 PCM 写进本机声卡，起播（或失败）后才回执。 */
@@ -579,6 +661,8 @@ export class SingerWorld implements World {
 
   private async singOnce(job: SingJob): Promise<SingOutcome> {
     if (!this.serviceOn) throw new SingerError('unavailable', '推理服务未启动：在「服务」页点「启动服务」');
+    // 闲置回收后第一次唱：先把它拉回来（服务仍是开着的）。
+    await this.ensureReady();
     await this.ensureBank();
     const engine = this.engine;
     if (!engine) throw new SingerError('unavailable', '唱歌引擎未启动');
@@ -856,6 +940,8 @@ export class SingerWorld implements World {
     if (this.stopped) return;
     // 点「重启引擎」就等于要把服务开着：停了也能从这里启回来。
     this.serviceOn = true;
+    this.idleStopped = false;
+    this.cancelIdle();
     await this.engine?.stop();
     if (this.stopped) return;
     // 接口的端口 / 令牌 / 开关可能一起改过：先关掉，按当前配置重新监听。
@@ -892,7 +978,10 @@ export class SingerWorld implements World {
     } catch (err) {
       throw new SingerError('param', err instanceof Error ? err.message : String(err));
     }
-    if (!engine.ready()) throw new SingerError('unavailable', engine.state().detail ?? '唱歌引擎未就绪');
+    if (!engine.ready()) {
+      await this.ensureReady();
+      if (!engine.ready()) throw new SingerError('unavailable', engine.state().detail ?? '唱歌引擎未就绪');
+    }
     const out = await this.sing(job);
     return { $binary: { mime: 'audio/wav', base64: out.audio.toString('base64') } };
   }

@@ -22,6 +22,11 @@ export interface SingerConfigSection {
   /** 随 Coopanion 启动就拉起推理服务（引擎 + 本机接口）；关掉后挂载了也先不启动。 */
   autoStart: boolean;
   /**
+   * 闲置多少分钟后停掉唱歌引擎、释放内存；0 表示不停。
+   * 只回收引擎，9882 接口保持监听，下一条请求会自动重新拉起。
+   */
+  idleMinutes: number;
+  /**
    * 借用 base 解释器（以及 CUDA / cuDNN）的 gpt-sovits 运行时目录（含 `runtime/python.exe`）。
    * 空为在 `<部署根>/runtimes/gpt-sovits/` 下自动挑一个可用版本。
    */
@@ -83,6 +88,8 @@ export const SINGER_DEFAULTS: SingerConfigSection = {
   tier: 'auto',
   device: 'auto',
   autoStart: true,
+  // 保持旧行为：升级后引擎照旧常驻，想要回收的用户自己开。
+  idleMinutes: 0,
   runtimeDir: '',
   pythonPath: '',
   voicebankDir: '',
@@ -126,6 +133,7 @@ const TEXT = {
     tierCpu: 'CPU',
     device: { title: '推理设备', description: '自动：显卡档运行时、派生 venv 里的 onnxruntime-gpu 与 NVIDIA 显卡都齐了就用显卡，缺一样退回 CPU。显卡推理多占约 0.8 GB 显存，热跑快约 6 倍；首次载入会热身一句，之后每句都不等。切到显卡后第一次「重启引擎」会补装 onnxruntime-gpu（约 215 MB，走阿里云镜像）。' },
     autoStart: { title: '随 Coopanion 启动服务', description: '开着时插件随 Coopanion 一起拉起唱歌引擎与本机接口；关掉后即使插件已加载也先不启动，省内存，要用时在面板「服务」点「启动服务」。这项只在下次启动 Coopanion 时决定初始状态，当前这次随时可以用面板的启动 / 停止。' },
+    idleMinutes: { title: '闲置回收（分钟）', description: '多久没有唱歌就停掉引擎子进程、释放内存；0 表示不回收（默认，保持旧行为）。只回收引擎，9882 接口照常监听，下一条请求会自动重新拉起。手动点「停止服务」后不会自动重启。' },
     deviceAuto: '自动',
     deviceCuda: '显卡（NVIDIA）',
     deviceCpu: 'CPU',
@@ -160,6 +168,7 @@ const TEXT = {
     tierCpu: 'CPU',
     device: { title: 'Inference device', description: 'Auto uses the GPU when the GPU runtime, onnxruntime-gpu in the derived venv and an NVIDIA GPU are all present; otherwise CPU. GPU inference takes about 0.8 GB of VRAM and is roughly 6x faster once warm; the engine sings a short warm-up line after loading, so the first real line never waits. Switching to GPU makes the next Restart engine install onnxruntime-gpu (~215 MB, Aliyun mirror first).' },
     autoStart: { title: 'Start the service with Coopanion', description: 'On means the plugin brings the singing engine and the loopback API up together with Coopanion. Off keeps the service stopped even though the plugin is loaded, saving memory; click Start service in the Service panel when you need it. This only decides the initial state on the next Coopanion launch; the Start / Stop buttons still work any time.' },
+    idleMinutes: { title: 'Idle shutdown (minutes)', description: 'Stop the engine process and free memory after this many idle minutes; 0 keeps it running (default, same as before). Only the engine is recycled — the 9882 API keeps listening and the next request starts it again. A manual Stop service is never overridden.' },
     deviceAuto: 'Auto',
     deviceCuda: 'GPU (NVIDIA)',
     deviceCpu: 'CPU',
@@ -228,6 +237,7 @@ export function configGroups(language: Language): ConfigGroup[] {
         description: t.groupService.description,
         properties: {
           [`${K}.autoStart`]: { type: 'boolean', title: t.autoStart.title, description: t.autoStart.description, 'x-hot': false },
+          [`${K}.idleMinutes`]: { type: 'number', title: t.idleMinutes.title, description: t.idleMinutes.description, minimum: 0, maximum: 1440, multipleOf: 1, 'x-hot': true },
           [`${K}.tier`]: { type: 'string', title: t.tier.title, description: t.tier.description, 'x-options': TIER_OPTIONS, 'x-hot': false },
           [`${K}.device`]: { type: 'string', title: t.device.title, description: t.device.description, 'x-options': DEVICE_OPTIONS, 'x-hot': false },
           [`${K}.runtimeDir`]: { type: 'string', title: t.runtimeDir.title, description: t.runtimeDir.description, 'x-path': { kind: 'directory' }, 'x-hot': false },

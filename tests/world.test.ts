@@ -1,10 +1,11 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Logger, WorldHost } from 'cortico/core/types.ts';
 import { MODEL_BYTES } from '../src/catalog.ts';
 import { SINGER_DEFAULTS } from '../src/config.ts';
+import type { SingerEngine } from '../src/engine.ts';
 import { SingerWorld } from '../src/world.ts';
 
 const roots: string[] = [];
@@ -21,7 +22,10 @@ const log: Logger = {
 };
 
 /** 起一个 World：不碰网络、不装任何东西；python 路径指向不存在的位置，引擎会立刻报错。 */
-async function makeWorld(): Promise<{
+async function makeWorld(opts: {
+  cfg?: Partial<typeof SINGER_DEFAULTS>;
+  createEngine?: () => SingerEngine;
+} = {}): Promise<{
   world: SingerWorld;
   dataDir: string;
   invoke: (method: string, args?: unknown[]) => Promise<unknown>;
@@ -29,9 +33,10 @@ async function makeWorld(): Promise<{
   const dataDir = mkdtempSync(join(tmpdir(), 'singer-world-'));
   roots.push(dataDir);
   const world = new SingerWorld({
-    cfg: { ...SINGER_DEFAULTS, enabled: true, httpApi: false },
+    cfg: { ...SINGER_DEFAULTS, enabled: true, httpApi: false, ...opts.cfg },
     dataDir,
     runtimesRoot: () => join(dataDir, 'runtimes'),
+    ...(opts.createEngine ? { createEngine: () => opts.createEngine!() } : {}),
   });
   worlds.push(world);
   await world.start({ log } as unknown as WorldHost);
@@ -115,5 +120,70 @@ describe('World 面板数据面', () => {
     expect(doc?.vars?.map((v) => v.name)).toEqual(['singer.state']);
     // 这个 World 的 python 路径不存在，状态里应带上失败原因。
     expect(world.envPromptVars()['singer.state']).toContain('Python 解释器不存在');
+  });
+});
+
+describe('闲置回收行为', () => {
+  /** 只关心生命周期的假引擎：start/stop 翻转 ready，并记停的次数。 */
+  function fakeEngine(): { engine: SingerEngine; ready: () => boolean; stops: () => number } {
+    let ready = false;
+    let stops = 0;
+    const engine = {
+      start: async () => { ready = true; },
+      stop: async () => { ready = false; stops += 1; },
+      ready: () => ready,
+      state: () => ({ phase: ready ? 'running' : 'stopped', detail: null }),
+      queue: () => 0,
+    } as unknown as SingerEngine;
+    return { engine, ready: () => ready, stops: () => stops };
+  }
+
+  it('到 idleMinutes 停引擎，下一条请求自动拉回', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeEngine();
+      const { world } = await makeWorld({ cfg: { autoStart: true, idleMinutes: 1 }, createEngine: () => fake.engine });
+      expect(fake.ready()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(fake.stops()).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fake.stops()).toBe(1);
+      expect(fake.ready()).toBe(false);
+
+      // 服务仍开着：ensureReady 会把它拉回来。
+      await world.ensureReady();
+      expect(fake.ready()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('idleMinutes 为 0（默认）时永不停引擎', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeEngine();
+      await makeWorld({ cfg: { autoStart: true }, createEngine: () => fake.engine });
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(fake.stops()).toBe(0);
+      expect(fake.ready()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('闲置回收配置', () => {
+  it('默认 0 分钟：升级后引擎照旧常驻', () => {
+    expect(SINGER_DEFAULTS.idleMinutes).toBe(0);
+  });
+
+  it('服务分组里能改，最小 0（0 表示不回收）', async () => {
+    const { world } = await makeWorld();
+    const group = world.webUi('zh').config?.find((g) => g.id.endsWith(':service'));
+    const prop = group?.schema.properties?.['worlds.singer.idleMinutes'] as { type?: string; minimum?: number } | undefined;
+    expect(prop?.type).toBe('number');
+    expect(prop?.minimum).toBe(0);
   });
 });

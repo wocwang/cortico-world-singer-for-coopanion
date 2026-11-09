@@ -57,6 +57,11 @@ export interface SingOutcome {
 export interface SingDeps {
   /** 引擎此刻能不能接活。 */
   ready(): boolean;
+  /**
+   * 引擎只是「闲置回收」停掉时，把它拉回来并等启动结束。
+   * 手动停服务、依赖没装、启动失败都直接返回，让 `ready()` 继续回 409。
+   */
+  ensureReady?(): Promise<void>;
   /** 不能接活时的说明，用作 409 文案。 */
   stateText(): string;
   /** 引擎状态：设备、声库、采样率、说话人。 */
@@ -200,6 +205,8 @@ export function startSingServer(opts: {
     } catch {
       throw new SingerHttpError(400, '请求体不是合法 JSON');
     }
+    // 闲置回收后第一次请求：先把它拉起来，别让调用方吃 409。
+    if (!deps.ready()) await deps.ensureReady?.();
     const job = readSingJob(parsed);
     if (!deps.ready()) throw new SingerHttpError(409, `引擎未就绪：${deps.stateText()}`);
     await acquire();

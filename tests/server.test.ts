@@ -74,6 +74,35 @@ describe('参数校验', () => {
   });
 });
 
+describe('闲置回收后自动拉起', () => {
+  it('POST /sing 先拉回引擎再唱，不返回 409', async () => {
+    let ready = false;
+    let wakes = 0;
+    const { deps } = fakeDeps({
+      ready: () => ready,
+      ensureReady: async () => {
+        wakes += 1;
+        await new Promise((r) => setTimeout(r, 20));
+        ready = true;
+      },
+    });
+    const base = await start(deps);
+    expect((await post(base, { lyrics: '晚风' })).status).toBe(200);
+    expect(wakes).toBe(1);
+    // 已经热了，第二次不该再调 ensureReady。
+    expect((await post(base, { lyrics: '晚风' })).status).toBe(200);
+    expect(wakes).toBe(1);
+  });
+
+  it('拉不回来（手动停服务/启动失败）仍是 409', async () => {
+    const { deps } = fakeDeps({ ready: () => false, stateText: () => '引擎已闲置停止' });
+    const base = await start(deps);
+    const res = await post(base, { lyrics: '晚风' });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain('引擎已闲置停止');
+  });
+});
+
 describe('HTTP 接口', () => {
   it('POST /sing 回 wav 与结果响应头', async () => {
     const { deps, calls } = fakeDeps();
