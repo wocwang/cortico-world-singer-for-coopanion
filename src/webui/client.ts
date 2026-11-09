@@ -166,9 +166,25 @@ const servicePanel: WebUiPanel = {
     const cancelBtn = ui.button(t.cancel, { size: 'sm', onClick: () => void call('cancel') });
     const startBtn = ui.button(t.startService, { variant: 'primary', size: 'sm', onClick: () => void call('start') });
     const stopBtn = ui.button(t.stopService, { size: 'sm', onClick: () => void call('stop') });
-    const restartBtn = ui.button(t.restart, { size: 'sm', onClick: () => void call('restart') });
+    let restartLock = 0;
+    const restartBtn = ui.button(t.restart, {
+      size: 'sm',
+      onClick: () => {
+        if (restartBtn.disabled) return;
+        restartBtn.disabled = true;
+        restartLock = Date.now();
+        void call('restart');
+      },
+    });
     const acts = ui.actions();
-    acts.append(installBtn, cancelBtn, startBtn, stopBtn, restartBtn);
+    acts.append(installBtn, cancelBtn, startBtn, stopBtn);
+    // 底部吸附条：重启引擎始终在页脚，滚动时不离开视野。
+    const restartBar = ui.actions();
+    restartBar.classList.add('sn-restartbar');
+    restartBar.hidden = true;
+    const restartNote = ui.h('span', 'sn-restart-note');
+    restartNote.hidden = true;
+    restartBar.append(restartNote, restartBtn);
 
     const log = ui.h('pre', 'sn-log');
     log.hidden = true;
@@ -182,7 +198,7 @@ const servicePanel: WebUiPanel = {
       },
     });
 
-    ctx.root.append(sheet, acts, logToggle, log, msg);
+    ctx.root.append(sheet, acts, logToggle, log, restartBar, msg);
 
     const uninstall = async (target: 'voicebank' | 'venv' | 'tmp', name: string, bytes: number): Promise<void> => {
       if (!(await ui.confirm({ title: t.uninstallConfirm(name, ui.fmt.bytes(bytes)), danger: true }))) return;
@@ -275,13 +291,21 @@ const servicePanel: WebUiPanel = {
       installBtn.textContent = allReady ? t.install : t.installSize(ui.fmt.bytes(s.install.total ?? 0));
       installBtn.disabled = busy || allReady;
       cancelBtn.hidden = !busy;
-      // 推理服务：停着只露「启动服务」，开着露「停止服务」与「重启引擎」。
+      // 推理服务：停着只露「启动服务」，开着露「停止服务」；重启引擎在页脚条。
       startBtn.hidden = s.service;
       stopBtn.hidden = !s.service;
-      restartBtn.hidden = !s.service;
       startBtn.disabled = busy;
       stopBtn.disabled = busy;
-      restartBtn.disabled = busy || s.phase === 'starting';
+      // 页脚条：服务开着时出现；启动/换声库期间保持禁用并给出文案。
+      const starting = s.phase === 'starting' || !!s.switching;
+      if (restartLock && Date.now() - restartLock > 1500 && !starting) restartLock = 0;
+      restartBar.hidden = !s.service;
+      restartBtn.disabled = !!restartLock || busy || starting;
+      restartNote.hidden = !starting && s.phase !== 'error';
+      restartNote.textContent = starting
+        ? (s.switching && s.pendingBank ? t.switchingBank(s.pendingBank) : t.starting)
+        : s.phase === 'error' ? `${t.error}: ${s.detail ?? ''}` : '';
+      restartNote.classList.toggle('is-bad', !starting && s.phase === 'error');
       // 接口
       setPill(apiRow.pill, s.port ? t.apiOn(s.port) : t.apiOff, s.port ? 'on' : 'off');
       apiRow.detail.textContent = s.queue ? t.queueText(s.queue) : '';

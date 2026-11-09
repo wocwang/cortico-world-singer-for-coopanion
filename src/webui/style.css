@@ -18,3 +18,22 @@
 .sn-audio { width: 100%; margin: .6em 0; }
 .sn-hint { font-size: .85em; opacity: .7; }
 textarea.field { min-height: 3.6em; resize: vertical; }
+/* 底部吸附操作条：沿用宿主 .actionbar 基类，再按本面板主题变量覆盖。 */
+.sn-restartbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin-top: 16px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border, var(--line, rgba(127, 127, 127, .25)));
+  background: var(--background, var(--bg-2, #fff));
+  justify-content: flex-end;
+  align-items: center;
+  gap: .6em;
+}
+.sn-restartbar[hidden] { display: none; }
+.sn-restart-note { flex: 1 1 auto; min-width: 0; font-size: .85em; color: var(--warn, #b8860b); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sn-restart-note[hidden] { display: none; }
+.sn-restart-note.is-bad { color: var(--bad, #c0392b); }
+/* 条贴底后去掉滚动容器原有的 56px 底内边距，避免滑到底留一道缝。 */
+.panelslot:has(> .sn-restartbar:not([hidden])) { padding-bottom: 0; }
