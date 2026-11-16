@@ -1,5 +1,15 @@
 # 更新记录
 
+## 0.1.25（2026-11-16）audify 跨插件共用一份，修重复加载导致的进程崩溃
+
+- Coopanion 的多个 World 跑在同一个 Electron 主进程里，每个插件目录都带一份
+  `audify.node`；第二份被 `require` 时 N-API 重复注册 environment cleanup hook，
+  `node::AddEnvironmentCleanupHook` 断言 `result.second` 失败，整个进程 `exit 134`，
+  桌宠表现为唱歌时突然消失、重启。
+- 修复：`loadAudify()` 把加载结果挂到 `globalThis.__corticoAudifyBinding`，与
+  GPT-SoVITS / RVC 等插件共用第一份原生模块；没有其它插件加载时行为不变。
+- 验证：`tsc --noEmit`、89 个单测全绿。
+
 ## 0.1.24（2026-11-16）移除误打入包的测试文件
 
 - 0.1.23 的 npm 包里混入了一个 2 字节的 `src/write-test.txt`（本地权限测试残留），
