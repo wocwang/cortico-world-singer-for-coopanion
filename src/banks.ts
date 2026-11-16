@@ -167,6 +167,25 @@ const LANG_TEXT = {
   en: { zh: 'Chinese', ja: 'Japanese', en: 'English', none: 'unknown' },
 };
 
+/** 声库展示名后面的单字语言标记：`中` / `日` / `英`。 */
+const LANG_MARK = {
+  zh: { zh: '中', ja: '日', en: '英' },
+  en: { zh: 'ZH', ja: 'JA', en: 'EN' },
+} as const;
+
+/**
+ * 音色展示名：`绮萱（中）`——括号里是声库的主语言（`readLanguages` 的第一项），
+ * 面板与设置下拉共用这一个函数，保证「绮萱」后面那个「中」处处一致。
+ */
+export function voiceName(
+  bank: Pick<BankInfo, 'label' | 'languages'>,
+  language: string = 'zh',
+): string {
+  const primary = bank.languages[0] as 'zh' | 'ja' | 'en' | undefined;
+  const mark = primary ? LANG_MARK[language === 'en' ? 'en' : 'zh'][primary] : '';
+  return mark ? `${bank.label}（${mark}）` : bank.label;
+}
+
 /** `中/日/英` 这样的语言标签。 */
 export function languageLabel(languages: string[], language: string): string {
   const table = language === 'en' ? LANG_TEXT.en : LANG_TEXT.zh;

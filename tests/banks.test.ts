@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { bankInfo, languageLabel, readLanguages } from '../src/banks.ts';
+import { bankInfo, languageLabel, readLanguages, voiceName } from '../src/banks.ts';
 
 const roots: string[] = [];
 
@@ -70,6 +70,15 @@ describe('声库语言识别', () => {
     expect(languageLabel(['zh', 'ja', 'en'], 'zh')).toBe('中文+日语+英语');
     expect(languageLabel([], 'en')).toBe('unknown');
     expect(languageLabel([], 'zh')).toBe('未识别');
+  });
+});
+
+describe('音色展示名', () => {
+  it('名字后面标声库的主语言：绮萱 → 绮萱（中），英语界面用 ZH', () => {
+    expect(voiceName({ label: '绮萱_v2.7.0', languages: ['zh', 'en'] })).toBe('绮萱_v2.7.0（中）');
+    expect(voiceName({ label: '欲音ルコ', languages: ['ja'] })).toBe('欲音ルコ（日）');
+    expect(voiceName({ label: 'Qixuan', languages: ['zh'] }, 'en')).toBe('Qixuan（ZH）');
+    expect(voiceName({ label: '未知', languages: [] })).toBe('未知');
   });
 });
 

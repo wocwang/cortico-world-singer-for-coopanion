@@ -1,8 +1,8 @@
 {
   "name": "@wocwang/cortico-world-singer-for-coopanion",
-  "version": "0.1.17",
+  "version": "0.1.21",
   "type": "module",
-  "description": "Cortico World for Coopanion: sing from lyrics with DiffSinger (Qixuan voicebank) and an optional RVC pass",
+  "description": "Cortico World for Coopanion: let the pet improvise a line and sing it on the spot with DiffSinger (Qixuan voicebank), optionally through RVC",
   "author": "wocwang",
   "license": "MIT",
   "publishConfig": {
@@ -39,11 +39,11 @@
     "locales": {
       "zh": {
         "displayName": "DiffSinger唱歌",
-        "description": "输入一行歌词，用 DiffSinger 自动配旋律唱出来：中文写汉字，换日语声库后写假名也能唱。声库可以放好几个，设置里按「名称 · 语言 · 音色」挑，Normal / Soft 这类音色也能单独切。不装 gpt-sovits 也能单独用：缺共享运行时会自己下一份 CPU 档（约 1 GB，三个插件共用）。全程本机推理，不联网、不训练。默认自动挑设备：显卡档运行时 + onnxruntime-gpu 就绪时走 NVIDIA 显卡（约 0.8 GB 显存，热跑约 0.7 秒一句），否则纯 CPU（约 1.3 GB 内存、不占显存）。可选接 RVC 把干声换成小肥鱼/星落落大肥鱼的音色（indexRate / protect 可调）。另开一个只监听本机的 HTTP 接口（默认 127.0.0.1:9882），其他插件与外部大模型可以用 POST /sing 直接拿 wav。桌宠 / 对话页里想唱时用工具 singer_sing 直接唱到本机声卡，气泡与声音同时开始，不用装 gpt-sovits。默认随 Coopanion 启动拉起唱歌服务，也可以关掉、要用时在面板手动启动。"
+        "description": "让大肥鱼临场发挥、随意唱歌：聊到兴头上，它自己现编一句词，旋律按起承转合生成——每句一个拱形（上行—顶点—下行），句末落主音、三音或五度，不同歌词走不同旋律，起音与落点也会变；节奏利落，每字半拍、句末一拍、不插气口。歌声由 DiffSinger 在本机合成（默认「绮萱」声库，不联网、不训练）；声库可放多个，设置里按「名称 · 中/日/英 · 音色」挑。可选接 RVC 换成小肥鱼 / 星落落大肥鱼的音色。桌宠 / 对话页用工具 singer_sing 直接本机外放，声音先起、随后气泡显示同一句歌词；面板可试听、下载 wav；另开只监听 127.0.0.1:9882 的 HTTP 接口，其他插件和外部大模型可 POST /sing 取 wav。有 NVIDIA 显卡时自动用显卡（热跑约 0.7 秒一句），否则用 CPU；默认随 Coopanion 启动，可在面板停掉；不装 gpt-sovits 也能单独用，缺共享运行时会自动下载一份 CPU 档（约 1 GB）。"
       },
       "en": {
         "displayName": "DiffSinger Singing",
-        "description": "Type a line of lyrics and hear it sung by DiffSinger with an auto-generated melody. Chinese lyrics use Han characters; with a Japanese voicebank, kana lyrics are sung too. Keep several voicebanks in one folder and pick one in the settings (label shows name, languages and colours), with a separate switch for colours such as Normal / Soft. Works without the gpt-sovits plugin: if the shared runtime is missing it downloads the CPU tier (~1 GB, shared by all three plugins). All inference runs locally, no training. The inference device is automatic: an NVIDIA GPU (~0.8 GB VRAM, ~0.7 s per line once warm) when the GPU runtime and onnxruntime-gpu are ready, otherwise pure CPU (~1.3 GB RAM, no VRAM). Optionally route the dry vocal through RVC. Also serves a loopback-only HTTP endpoint (127.0.0.1:9882 by default) so other plugins and online LLMs can POST /sing and get a wav back. In the pet window or chat page the bot sings through the singer_sing tool straight to this computer's speakers, with the bubble and the voice starting together — no gpt-sovits plugin needed. The singing service starts with Coopanion by default; you can turn that off and start it from the panel when needed."
+        "description": "Let the pet improvise and sing on the spot: it writes a line from the current chat, and the melody follows a four-part 起承转合 arc — each phrase is an arch (rise, peak, fall), ending on the tonic, third or fifth; different lyrics get different melodies, and the starting and ending notes vary. The rhythm stays crisp: half a beat per character, one beat on the phrase's last character, no breath gaps. DiffSinger sings it locally (Qixuan voicebank by default; no network, no training); keep several voicebanks and pick one in the settings by name, language marker (中 / 日 / 英) and colour. An optional RVC pass switches the timbre to 小肥鱼 / 星落落大肥鱼. In the pet window or chat page the singer_sing tool plays the line straight to this computer's speakers — the voice starts first, then the bubble shows the same lyric; the panel can preview and download wav; a loopback-only HTTP endpoint (127.0.0.1:9882) lets other plugins and online LLMs POST /sing for a wav. An NVIDIA GPU is used automatically when available (~0.7 s per line once warm), otherwise CPU; starts with Coopanion by default and can be stopped in the panel; works without the gpt-sovits plugin (it downloads a ~1 GB CPU runtime tier if the shared runtime is missing)."
       }
     },
     "tags": [

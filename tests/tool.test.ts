@@ -92,7 +92,7 @@ class FakePlayer implements WavPlayer {
   close(): void {}
 }
 
-function makeWorld(opts: { failPlayer?: boolean } = {}): {
+function makeWorld(opts: { failPlayer?: boolean; cfg?: Partial<SingerConfigSection> } = {}): {
   fake: Fake;
   player: FakePlayer;
   world: SingerWorld;
@@ -103,7 +103,9 @@ function makeWorld(opts: { failPlayer?: boolean } = {}): {
   const voicebankDir = join(dataDir, 'voicebank');
   mkdirSync(join(voicebankDir, 'dsdur'), { recursive: true });
   writeFileSync(join(voicebankDir, 'dsconfig.yaml'), 'singer_type: diffsinger\n');
-  const cfg: SingerConfigSection = { ...SINGER_DEFAULTS, enabled: true, httpApi: false, voicebankDir };
+  const cfg: SingerConfigSection = {
+    ...SINGER_DEFAULTS, enabled: true, httpApi: false, voicebankDir, ...opts.cfg,
+  };
   const fake = makeFake();
   const player = new FakePlayer(opts.failPlayer);
   const world = new SingerWorld({
@@ -155,16 +157,38 @@ describe('singer_sing 工具', () => {
     expect(out.text).toContain('缺少 lyrics');
   });
 
-  it('正常唱一句：合成一次，data 段写进播放器并 flush', async () => {
+  it('正常唱一句：合成一次，data 段写进播放器并 flush，回执正文就是这句歌词', async () => {
     const { fake, player, world } = makeWorld();
     await world.start({ log } as unknown as WorldHost);
     await nextTick();
     const out = await call(world, { lyrics: '晚风吹过旧时光' });
     expect(out.failed).toBeUndefined();
-    expect(out.text).toContain('Sang one line');
+    expect(out.text).toBe('晚风吹过旧时光');
     expect(fake.songs.length).toBe(1);
     expect(player.writes).toEqual([{ sampleRate: 44100, bytes: 4 }]);
     expect(player.flushes).toBe(1);
+  });
+
+  it('对话里改速度 / 移调 / 调式：透传给引擎，并沿用到下一句', async () => {
+    const { fake, world, invoke } = makeWorld();
+    await world.start({ log } as unknown as WorldHost);
+    await nextTick();
+    await call(world, { lyrics: '晚风吹过旧时光', bpm: 72, keyShift: 3, scale: 'minor' });
+    await call(world, { lyrics: '再唱一句' });
+    expect(fake.songs[0]).toMatchObject({ bpm: 72, keyShift: 3, scale: 'minor' });
+    expect(fake.songs[1]).toMatchObject({ bpm: 72, keyShift: 3, scale: 'minor' });
+    const st = (await invoke('state')) as { defaults: { bpm: number; keyShift: number; scale: string } };
+    expect(st.defaults).toEqual({ bpm: 72, keyShift: 3, scale: 'minor' });
+  });
+
+  it('RVC 不可用：直接播原声，这一句不失败', async () => {
+    const { player, world } = makeWorld({ cfg: { rvcEnabled: true, rvcEndpoint: 'http://127.0.0.1:1' } });
+    await world.start({ log } as unknown as WorldHost);
+    await nextTick();
+    const out = await call(world, { lyrics: '晚风' });
+    expect(out.failed).toBeUndefined();
+    expect(out.text).toBe('晚风');
+    expect(player.writes.length).toBe(1);
   });
 
   it('播放失败：回 failed 并写明 could not play，插件不回退成假唱', async () => {

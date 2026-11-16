@@ -131,7 +131,7 @@ export function readSingJob(body: unknown): SingJob {
     seed: readNumber(raw.seed, 'seed', 0, 2 ** 31 - 1, 0),
     pitchSteps: readNumber(raw.pitchSteps, 'pitchSteps', STEPS_MIN, STEPS_MAX, 10),
     varianceSteps: readNumber(raw.varianceSteps, 'varianceSteps', STEPS_MIN, STEPS_MAX, 10),
-    acousticSteps: readNumber(raw.acousticSteps, 'acousticSteps', STEPS_MIN, STEPS_MAX, 20),
+    acousticSteps: readNumber(raw.acousticSteps, 'acousticSteps', STEPS_MIN, STEPS_MAX, 40),
     gender: readNumber(raw.gender, 'gender', -1, 1, 0, false),
     maxSeconds: readNumber(raw.maxSeconds, 'maxSeconds', MAX_SECONDS_MIN, MAX_SECONDS_MAX, 60),
     speaker: readString(raw.speaker, 'speaker', 64),

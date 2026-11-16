@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "singer_sing",
-      "description": "Sing one line aloud on this computer in your singing voice. Emit it in the same reply as the pet_say that shows the same line, immediately followed by that pet_say, without waiting for this result: tools run in order, so the bubble appears as the voice begins. Write Chinese lyrics as Han characters, Japanese as kana (needs a Japanese voicebank), English as space-separated words.",
+      "description": "Sing one line aloud on this computer in your singing voice. Use it whenever the person asks you to sing, hum, or casually \"sing a few lines\": actually sing instead of only answering in text. Call it first, wait for this result, then call pet_say with exactly the text this tool returns (the lyric line) so the bubble appears together with the voice. If the person asks to sing slower/faster, higher/lower or in a different mood, pass bpm / keyShift / scale in this same call: they take effect for this line and stay in effect for later lines until changed again. Write Chinese lyrics as Han characters, Japanese as kana (needs a Japanese voicebank), English as space-separated words.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -11,6 +11,26 @@
             "type": "string",
             "maxLength": 2000,
             "description": "The lyric line to sing."
+          },
+          "bpm": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 200,
+            "description": "Tempo. 96 is the default; lower means slower (\"唱慢一点\" → 60–80)."
+          },
+          "keyShift": {
+            "type": "integer",
+            "minimum": -12,
+            "maximum": 12,
+            "description": "Transpose in semitones, positive is higher (\"调高点\" → +2..+4)."
+          },
+          "scale": {
+            "type": "string",
+            "enum": [
+              "major",
+              "minor"
+            ],
+            "description": "Major is bright, minor is moody (\"换小调\" → minor)."
           }
         },
         "required": [
@@ -21,8 +41,8 @@
         "speak"
       ],
       "summary": {
-        "zh": "在本机把一句歌词唱出来，紧跟 pet_say 调用，气泡与声音同时开始。",
-        "en": "Sings one lyric line on this computer, right before the pet_say that shows the same line, so the bubble appears as the voice begins."
+        "zh": "在本机把一句歌词唱出来；等它返回后再 pet_say 同一句歌词，气泡与声音同时出现。",
+        "en": "Sings one lyric line on this computer; call pet_say with the returned line afterwards, so the bubble appears together with the voice."
       }
     }
   ],
@@ -32,7 +52,7 @@
       "key": "worlds.singer.envPrompt",
       "title": "DiffSinger 唱歌 · 环境提示词",
       "role": "envPrompt",
-      "content": "## 唱歌（DiffSinger · 绮萱）\n\n状态：{{singer.state}}\n\n- QQ 里有人点歌、想听你唱一句，或聊天的气氛适合唱时：调 `qq_send`，`to` 照抄事件 meta 里的 `conv`，`voice` 设为 true，正文只写「【唱】」加一句中文歌词。\n- 歌词按刚才的聊天现写，一句 8–16 字，中文；那条消息里不要写别的话，否则会连着一起被唱。\n- 想先说一句再说唱，就分两次发：先用 `qq_send`（不带 voice）说那句话，再单独发一条带 `voice: true` 的「【唱】…」。\n- 语音通道会把「【唱】…」交给唱歌插件唱成语音条，不用调 `sovits_speak`，也不用解释「这就唱给你听」；QQ 里也不要调 `singer_sing`（它只在本机外放）。\n- 桌宠或对话页里想唱时：在同一次回复里先调 `singer_sing`（`lyrics` 写这一句歌词），紧接着调 `pet_say` 显示同一句歌词；两个调用连着发出，不要等 `singer_sing` 的回执——工具按顺序执行，气泡会正好在声音响起时出现。`singer_sing` 只在本机外放，不会发到 QQ；唱歌面板和 `POST /sing` 也照常可用。\n- 唱日语要写假名（汉字没有读音会被跳过），而且得先把唱歌插件的声库换成日语声库；没换之前日语歌词唱不出来，会退回念。\n- 唱英语按单词写（空格分词）；用自带英语词典的声库（绮萱自带，不用换）。要唱中文就换回中文声库。\n- 状态是「未启动」时多半是面板里点过「停止服务」：让主人到「DiffSinger 唱歌」页点「启动服务」，别假装已经唱了；这时 `singer_sing` 会回没有声音。\n"
+      "content": "## 唱歌（DiffSinger · 绮萱（中））\n\n状态：{{singer.state}}\n\n- 桌宠或对话页里，用户让你唱、说「随便唱几句」「唱一个」「来一段」，或者气氛适合唱时，就真的唱：先调 `singer_sing`，`lyrics` 按刚才的聊天现写一句 8–16 字的中文歌词；**等它返回**，再用 `pet_say` 原样显示它返回的那句歌词（不加引号、不加解释）。返回失败时不要拿歌词做气泡，如实说这次没唱成。\n- 先唱后显示：`singer_sing` 要等这一句真正开始出声才返回，气泡才会跟声音一起出现。不要把 `singer_sing` 和 `pet_say` 放在同一批里一起发出去。\n- 用户说「唱慢一点 / 唱快一点 / 调高点 / 调低点 / 换小调」这类话时，不要让主人去设置页：下一次 `singer_sing` 直接带上 `bpm`（60–200，默认 96，慢一点≈66–80）、`keyShift`（半音，正数更高，高一点≈+2~+4）或 `scale`（major / minor）。这些值会沿用到再改一次为止。\n- QQ 里点歌仍走 `qq_send`：`voice` 设为 true，正文只写「【唱】」加一句中文歌词；那条消息里不要写别的话。QQ 里不要调 `singer_sing`（它只在本机外放）。\n- 想先说一句再说唱，桌宠 / 对话页就分两次回复：先 `pet_say` 说那句，下一轮再 `singer_sing` → 等返回 → `pet_say` 歌词。\n- 唱日语要写假名（汉字没有读音会被跳过），而且得先把唱歌插件的声库换成日语声库；没换之前日语歌词唱不出来，会退回念。\n- 唱英语按单词写（空格分词）；用自带英语词典的声库（绮萱自带，不用换）。要唱中文就换回中文声库。\n- 状态是「未启动」时多半是面板里点过「停止服务」：让主人到「DiffSinger 唱歌」页点「启动服务」，别假装已经唱了；这时 `singer_sing` 会回没有声音。\n"
     }
   ]
 }

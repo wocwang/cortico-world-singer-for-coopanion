@@ -9,7 +9,7 @@ Node 侧（engine.ts）把 JSON 一行写进 stdin，worker 把 JSON 一行写�
 一次 `sing` 的完整链路：
     歌词 → 按标点断句 → 每字/每假名/每词取音素（中文查拼音，日语查声库自带假名词典，
     英语查声库自带英语词典并按音节分音符）
-         → 程序生成五声音阶旋律
+         → 按起承转合生成五声音阶旋律（上行—顶点—下行，句末落主音/三音）
          → DS 段落（note_seq / note_dur / ph_seq / ph_num）
          → diffsinger_utau（dur → pitch → variance → acoustic → vocoder）→ wav
 
@@ -46,6 +46,361 @@ SCALES = {
     "major": [0, 2, 4, 7, 9],
     "minor": [0, 3, 5, 7, 10],
 }
+
+# 旋律骨架用「绝对五声级数」表示：0 是主音，每 5 级换一个八度（5、6… 自然跨到高八度）。
+# 音域 0…8 级约 1.5 个八度（C4…G5），对上儿歌常见的十度音域。
+MELODY_LOW = 0
+MELODY_HIGH = 8
+# 每句落音只允许主音、三音、五度（含高八度），可以落在高八度：0/5 是主音，2/7 是三音，3/8 是五度。
+MELODY_TONIC = 0
+MELODY_THIRD = 2
+MELODY_TONIC_HIGH = 5
+MELODY_CADENCES = (0, 2, 3, 5, 7, 8)
+# 句尾拉长、句间气口、句内气口（单位：拍）。句末音长不写死，按本句其余音的平均时长的倍数算，
+# 这样换了节奏型的套件（轻快 / 慢板）句尾的相对收束感都一致。
+# 声库在每个音的起音处会按音值比例留一段辅音/气声（长音实测 0.5–0.9 s），音值越长越拖；
+# 所以节奏型整体收紧到 0.75，句尾倍数也回到 2.1 / 2.3，末音上限 2.4 拍。
+# 节奏模式：
+#   classic —— 原版 0.1.16 的断句：每字半拍、每句末字一拍、不插任何气口，速度用设定值不浮动；
+#   flow    —— 0.1.20 的套件节奏：节奏型 ×0.75、句尾按倍数拉长、句内/句间气口与 ±8% 速度浮动。
+# 默认用 classic：用户反馈原版的句子最利落，而旋律仍走下面的起承转合规则（两版逐音音高一致，
+# 只换时值），要回到 0.1.20 的呼吸感改这一个常量即可。
+RHYTHM_MODE = "classic"
+RHYTHM_SCALE = 0.75
+PHRASE_TAIL_RATIO = 2.1
+FINAL_TAIL_RATIO = 2.3
+TAIL_MIN_BEATS = 1.2
+TAIL_MAX_BEATS = 2.4
+BREATH_BEATS = 0.4
+INNER_BREATH_BEATS = 0.12
+# 动机家族：全部是手写的通用走法（相对动机起点的五声级数），只描述「上行—顶点—回落」，
+# 不取自任何现有歌曲。大调偏明亮，小调偏下行；按句长挑长度最贴近的一条。
+MOTIF_FAMILIES = {
+    "arch": {  # 拱形：先上到顶点再回落，最像儿歌里的一句话
+        "major": ((0, 1, 2, 1), (0, 1, 2, 3, 2), (0, 2, 3, 2, 1)),
+        "minor": ((0, 1, 2, 1), (0, 1, 2, 3, 2), (0, 2, 1, 0)),
+    },
+    "step": {  # 级进：几乎只用相邻音，平稳、口语感强
+        "major": ((0, 1, 2, 1), (0, 1, 2, 3, 2), (0, 1, 2, 1, 0), (0, 1, 2, 3, 2, 1)),
+        "minor": ((0, 1, 2, 1), (0, 1, 2, 3, 2), (0, 1, 0, 1), (0, 1, 2, 1, 0, 1)),
+    },
+    "leap": {  # 跳进：三四度起句，活泼
+        "major": ((0, 2, 3, 2), (0, 2, 1, 2), (0, 3, 2, 1), (0, 2, 3, 2, 1)),
+        "minor": ((0, 2, 3, 2), (0, 2, 1, 0), (0, 3, 1, 2), (0, 3, 2, 1, 0)),
+    },
+    "wave": {  # 波浪：上上下下，起伏连续
+        "major": ((0, 1, 2, 1, 2), (0, 2, 1, 2), (0, 1, 0, 1, 2), (0, 2, 1, 2, 1)),
+        "minor": ((0, 1, 2, 1, 2), (0, 2, 1, 2), (0, 1, 2, 1), (0, 2, 1, 2, 1)),
+    },
+    "hump": {  # 小回环：上去一点就折回，句幅短，童谣感
+        "major": ((0, 2, 1, 2), (0, 3, 2, 3), (0, 2, 3, 2), (0, 2, 1, 2, 1)),
+        "minor": ((0, 2, 1, 2), (0, 3, 2, 1), (0, 2, 1, 0), (0, 2, 1, 2, 1)),
+    },
+    "climb": {  # 阶梯上行：一路往上不回头，句尾挂在高处，适合两小句一问一答
+        "major": ((0, 1, 2, 4), (0, 2, 3, 4), (0, 1, 3, 4), (0, 1, 2, 3, 4)),
+        "minor": ((0, 1, 3, 4), (0, 2, 3, 4), (0, 1, 2, 4), (0, 1, 2, 3, 4)),
+    },
+    "swing": {  # 摆荡：宽窄交替，起伏落差大，山歌 / 船歌用
+        "major": ((0, 2, 1, 3), (0, 1, 3, 2), (0, 2, 4, 2), (0, 2, 3, 1)),
+        "minor": ((0, 2, 1, 3), (0, 1, 3, 2), (0, 3, 2, 1), (0, 2, 1, 3, 1)),
+    },
+    "sigh": {  # 叹息：起音高、顺势落下，叙事 / 抒情
+        "major": ((0, 2, 1, 0), (0, 1, 0, 1), (0, 3, 2, 1), (0, 2, 1, 0, 1)),
+        "minor": ((0, 2, 1, 0), (0, 1, 0, 1), (0, 3, 2, 1), (0, 2, 1, 0, 1)),
+    },
+}
+# 结构套件：一首歌只挑一套，套内所有句子严格共用（乐句循环长度、动机家族、起音、落音偏好、
+# 节奏型、重音间隔、句内气口间隔），不同套之间听感差别明显。每句自己是个小拱形，句子之间靠
+# 音区抬高：起低、承中高、转最高、合回落。规则组织方式参考了 music21 的「独立规则 + 统一检查」
+# 思路（仅借鉴组织方式，未引用其代码；music21 为 BSD 许可）。
+# start：这套的起音级数，直接决定这首歌从哪个音区开口（不再靠抬级+移调去凑）。
+# accent / turn_acc：长音每隔几个音落一次；「转」句用更密的 turn_acc，靠节奏再加一层对比。
+SCHEMES = (
+    {   # 儿歌：四句一轮，动机短、拱形，落三音，节奏轻快
+        "name": "儿歌",
+        "period": 4,
+        "family": "arch",
+        "cadence": "open",
+        "start": 1,
+        "motif_len": (4, 4),
+        "rhythm": (0.5, 1.0),
+        "accent": 3,
+        "turn_acc": 2,
+        "breath": (6, 7),
+    },
+    {   # 进行曲：两句一问一答，级进为主，落主音，节奏方正
+        "name": "进行曲",
+        "period": 2,
+        "family": "step",
+        "cadence": "closed",
+        "start": 0,
+        "motif_len": (5, 6),
+        "rhythm": (0.75, 1.25),
+        "accent": 4,
+        "turn_acc": 2,
+        "breath": (7, 8),
+    },
+    {   # 山歌：三句一轮，跳进起句，落三音，长短悬殊
+        "name": "山歌",
+        "period": 3,
+        "family": "leap",
+        "cadence": "open",
+        "start": 3,
+        "motif_len": (4, 5),
+        "rhythm": (0.5, 1.5),
+        "accent": 3,
+        "turn_acc": 2,
+        "breath": (6, 8),
+    },
+    {   # 摇篮曲：三句一轮，波浪走向，慢而长，收主音
+        "name": "摇篮曲",
+        "period": 3,
+        "family": "wave",
+        "cadence": "closed",
+        "start": 1,
+        "motif_len": (4, 5),
+        "rhythm": (1.0, 1.5),
+        "accent": 4,
+        "turn_acc": 3,
+        "breath": (7, 8),
+    },
+    {   # 童谣：四句一轮，小回环，落三音，节奏最碎
+        "name": "童谣",
+        "period": 4,
+        "family": "hump",
+        "cadence": "open",
+        "start": 2,
+        "motif_len": (4, 4),
+        "rhythm": (0.5, 0.75),
+        "accent": 3,
+        "turn_acc": 2,
+        "breath": (6, 8),
+    },
+    {   # 船歌：两句一轮，阶梯上行，落三音，长音拖得开
+        "name": "船歌",
+        "period": 2,
+        "family": "climb",
+        "cadence": "open",
+        "start": 4,
+        "motif_len": (5, 6),
+        "rhythm": (0.75, 1.5),
+        "accent": 3,
+        "turn_acc": 2,
+        "breath": (7, 8),
+    },
+    {   # 圆舞曲：三句一轮，宽窄交替，收主音，长音每两拍一次
+        "name": "圆舞曲",
+        "period": 3,
+        "family": "swing",
+        "cadence": "closed",
+        "start": 2,
+        "motif_len": (4, 5),
+        "rhythm": (0.75, 1.25),
+        "accent": 2,
+        "turn_acc": 2,
+        "breath": (6, 7),
+    },
+    {   # 叙事：四句一轮，叹息下行，收主音，慢句多
+        "name": "叙事",
+        "period": 4,
+        "family": "sigh",
+        "cadence": "closed",
+        "start": 0,
+        "motif_len": (4, 5),
+        "rhythm": (1.0, 2.0),
+        "accent": 3,
+        "turn_acc": 3,
+        "breath": (7, 8),
+    },
+)
+# 乐句角色循环：同一首歌按 period 循环，最后一句永远收束成「合」。
+ROLE_CYCLES = {
+    2: ("起", "承"),
+    3: ("起", "承", "转"),
+    4: ("起", "承", "转", "起"),
+}
+
+
+def pentatonic_midi(base, degree, scale_steps):
+    """绝对五声级数 → MIDI。级数超过 5 就自然进到高八度，不再受「八度走不到」的老分支限制。"""
+    return base + 12 * (degree // len(scale_steps)) + scale_steps[degree % len(scale_steps)]
+
+
+def clamp_degree(degree):
+    return max(MELODY_LOW, min(MELODY_HIGH, degree))
+
+
+def pick_motif(pool, length_band, rng):
+    """同一个动机家族里，挑长度最贴合这套结构的一条（句长分布由结构套件决定）。"""
+    low, high = length_band
+    target = (low + high) / 2
+    fitting = [m for m in pool if low <= len(m) <= high] or list(pool)
+    nearest = min(abs(len(m) - target) for m in fitting)
+    return rng.choice([m for m in fitting if abs(len(m) - target) == nearest])
+
+
+def phrase_range(role, motif, start, end_options):
+    """一句的音区起点与落音：起=套件起点，承高三级，转高五级，合回落一级。
+
+    起点由结构套件的 `start` 指定，不再靠「抬级 + 移调」临时凑，也不会因为叠加到音域上限
+    被 clamp 削成同一个音；落音从 `end_options`（主音 / 三音 / 五度）里挑「最靠近动机尾音、
+    又低于顶点」的那个，不再每首死落主音。
+    """
+    if role == "承":
+        base = start + 3
+    elif role == "转":
+        base = start + 5
+    elif role == "合":
+        base = start + 1
+    else:
+        base = start
+    base = max(MELODY_LOW, min(base, MELODY_HIGH - max(motif)))
+    peak = base + max(motif)
+    choices = [degree for degree in end_options if degree < peak]
+    if not choices:
+        choices = [degree for degree in MELODY_CADENCES if degree < peak] or [MELODY_TONIC]
+    end = min(choices, key=lambda degree: abs(degree - (base + motif[-1])))
+    return base, end
+
+
+def tame_leaps(degrees):
+    """一次大跳之后接级进：连续两个同方向的「三度以上」跳进，把后一个收成级进（顶点不削）。"""
+    out = list(degrees)
+    for index in range(2, len(out) - 1):
+        before, prev, cur = out[index - 2], out[index - 1], out[index]
+        if abs(cur - prev) >= 2 and abs(prev - before) >= 2 and (cur - prev) * (prev - before) > 0:
+            nxt = out[index + 1]
+            if (cur > prev and cur >= nxt) or (cur < prev and cur <= nxt):
+                continue  # 这一音就是顶点/谷底，削平了整句就没起伏
+            out[index] = clamp_degree(prev + (1 if cur > prev else -1))
+    return out
+
+
+def polish(degrees, end):
+    """收尾清理：落音固定；落音前一级级靠近；全句相邻同音掰开（落音不动）。"""
+    out = list(degrees)
+    if not out:
+        return out
+    out[-1] = end
+    if len(out) >= 2 and (abs(out[-2] - end) > 2 or out[-2] == end):
+        out[-2] = clamp_degree(end + 2 if end + 2 <= MELODY_HIGH else end + 1)
+    for index in range(1, len(out) - 1):
+        if out[index] == out[index - 1]:
+            direction = 1 if out[index + 1] >= out[index] else -1
+            if not MELODY_LOW <= out[index] + direction <= MELODY_HIGH:
+                direction = -direction
+            out[index] += direction
+    if len(out) >= 3 and out[-2] == out[-3]:
+        out[-2] = clamp_degree(end + 1)
+    return out
+
+
+def descend_degrees(current, end, count, stride=2):
+    """从 current 往下走到 end，返回 current 之后的 count 个音：前面能跨 stride 级，最后一步必定级进。"""
+    notes = []
+    remaining = current - end
+    for step in range(count):
+        left = count - step
+        drop = remaining if left == 1 else min(stride, max(0, remaining - (left - 1)))
+        current -= drop
+        remaining -= drop
+        notes.append(clamp_degree(current))
+    return notes
+
+
+def motif_degrees(motif, count, base, end):
+    """用这一句所属的动机铺满整句：动机本体 + 抬一级的模进重复，最后收在落音上。
+
+    句内的重复与模进是固定规则，不随 seed 抖动；换 seed 只换结构套件与音区。
+    """
+    if count <= 1:
+        return [end] * count
+    notes = []
+    cycle = 0
+    while len(notes) < count:
+        shift = min(cycle, 2)  # 每次重复抬一级做模进，最多抬两级
+        before = len(notes)
+        for step in motif:
+            if len(notes) >= count:
+                break
+            value = clamp_degree(base + step + shift)
+            if notes and value == notes[-1]:
+                continue
+            notes.append(value)
+        cycle += 1
+        if len(notes) == before:  # 顶到音域边界原地打转时，改成逐级下行补满
+            while len(notes) < count:
+                notes.append(clamp_degree(notes[-1] - 1 if notes[-1] > end else notes[-1] + 1))
+    return polish(tame_leaps(notes), end)
+
+
+def descending_tail(start, end, count, stride=2):
+    """从 start 一路下行落到 end，「合」句同头之后的换尾收束。"""
+    if count <= 1:
+        return [end] * count
+    return [start] + descend_degrees(start, end, count - 1, stride)
+
+
+def turn_variant(motif):
+    """「转」句同头换尾：起头照搬（相邻句听得出是同一支曲子），尾段再挑一级，收束前的走法不同。
+
+    真正的落音仍由落音规则决定，这里只动动机尾巴。与前后句的区别主要靠音区（固定冲到最高）
+    和更密的节奏（套件里的 turn_acc），这样既有对比，又不把相邻句的轮廓呼应切断。
+    """
+    if len(motif) < 3:
+        return motif
+    lift = 1 if motif[-1] < 3 else -1
+    return motif[:-1] + (motif[-1] + lift,)
+
+
+def phrase_rhythm(count, short_beats, long_beats, accent, phase=0):
+    """结构套件自带的节奏型：长音每隔 accent 个音落一次，其余短音；句末音另算。
+
+    `phase` 是每首歌自己的重音起点（0…accent-1）：同一套件里长音位置整体挪一格，
+    时值分布因此换一首就不同，但「每隔 accent 个音一个长音」这条规则不变。
+    """
+    if count <= 1:
+        return []
+    return [long_beats if (index + phase) % accent == 0 else short_beats for index in range(count - 1)]
+
+
+def phrase_tail(body, ratio):
+    """句末音长 = 本句其余音平均时长的 ratio 倍（限幅），轻快与慢板套件的收束感一致。"""
+    if not body:
+        return TAIL_MIN_BEATS
+    mean = sum(body) / len(body)
+    return min(TAIL_MAX_BEATS, max(TAIL_MIN_BEATS, mean * ratio))
+
+
+def tone_bias(chars, degrees, reader, limit=2):
+    """按普通话声调给个别音符加半音偏置，压低倒字（T2 该走高、T4 该走低）。
+
+    一句最多动两个音，且只在旋律方向与声调方向相反时动，不动落音。
+    """
+    offsets = [0] * len(chars)
+    if reader is None or len(chars) < 2:
+        return offsets
+    changed = 0
+    for index in range(len(chars) - 1):
+        tone = reader(chars[index])
+        if tone not in (2, 4):
+            continue
+        step = degrees[index + 1] - degrees[index]
+        if index + 1 >= len(chars) - 1:
+            continue  # 落音不许偏置，句末必须落在主音/三音上
+        if offsets[index + 1]:
+            continue
+        if tone == 2 and step < 0:
+            offsets[index + 1] = 1   # 阳平该走高：把后面的音抬半音，减小下行的幅度
+        elif tone == 4 and step > 0:
+            offsets[index + 1] = -1  # 去声该走低：把后面的音压半音
+        else:
+            continue
+        changed += 1
+        if changed >= limit:
+            break
+    return offsets
+
 
 # 断句：只按句读断，空白留给各语言自己切（英语按空格分词，中日文忽略空白）。
 PHRASE_SPLIT = re.compile(r"[，。！？、；：,.!?;:…—~～\[\]【】()（）\"“”‘’]+")
@@ -316,6 +671,7 @@ class Singer:
         self.en_full = False   # 小词典是否已整份读进 en_cache
         self.en_small = True
         self.sample_rate = 44100
+        self._tone_reader = None  # 汉字声调查询器，首次用到时再建
 
     def load(self):
         normalize_bank_text(self.voicebank_dir)
@@ -396,7 +752,9 @@ class Singer:
         再由 install_color_router 分发到各阶段。
         """
         if not wanted:
-            return None
+            # 没指定音色就显式拿第一个：多音色声库如果传 None，库会自己每次挑，出现一句一个音色。
+            names = list(self.pred.available_speakers or [])
+            return names[0] if names else None
         suffix = speaker_suffix(wanted)
         for name in (self.pred.available_speakers or []):
             if speaker_suffix(name).lower() == suffix.lower():
@@ -712,58 +1070,165 @@ class Singer:
 
     # ---------- 旋律 ----------
 
+    def tone_reader(self):
+        """返回「汉字 → 普通话声调 1..4」的查询函数；取不到就返回 None（跳过声调修正）。
+
+        优先用可选的 pypinyin，其次声库自带的拼音词典；两者都没有也只是不做修正，不影响出声。
+        """
+        if self._tone_reader is not None:
+            return self._tone_reader or None
+        reader = self._pypinyin_tone_reader() or self._dict_tone_reader()
+        self._tone_reader = reader or False
+        return reader
+
+    def _pypinyin_tone_reader(self):
+        try:
+            from pypinyin import Style, lazy_pinyin
+        except Exception:
+            return None
+
+        def read(char):
+            if not HAN.match(char):
+                return None
+            text = lazy_pinyin(char, style=Style.TONE3, neutral_tone_with_five=True)[0]
+            return int(text[-1]) if text and text[-1] in "1234" else None
+
+        return read
+
+    def _dict_tone_reader(self):
+        """声库词典里如果存的是带声调数字的拼音（如 ni3），就直接拿来用。"""
+        table = getattr(self.replacer, "opencpop_dict", None)
+        if not isinstance(table, dict):
+            return None
+
+        def read(char):
+            value = table.get(char)
+            return int(value[-1]) if isinstance(value, str) and value and value[-1] in "1234" else None
+
+        return read
+
     def build_notes(self, lyrics, bpm, key_shift, scale, seed, max_seconds):
-        """按句生成旋律；每字/每音节一个音符，句间插一个 SP 休止。返回 (notes, text, lang)。"""
+        """按句生成旋律：先挑一套结构规则，再按这套规则铺动机、定落音、切气口。
+        每字/每音节一个音符。返回 (notes, text, lang)。"""
         import random
 
         beat = 60.0 / max(40, bpm)
         scale_steps = SCALES.get(scale, SCALES["major"])
         rng = random.Random(seed)
-        base = 60 + key_shift  # C4 起，移调后仍是同一调式
+        root = 60 + key_shift  # C4 起，移调后仍是同一调式
 
-        phrases = [p for p in PHRASE_SPLIT.split(lyrics) if p]
+        phrases = []
+        for piece in PHRASE_SPLIT.split(lyrics):
+            if not piece:
+                continue
+            units, lang = self.phrase_units(piece)
+            if units:
+                phrases.append((units, lang))
+
+        # 结构规则整首只挑一次：乐句循环、动机家族、起音、落音偏好、节奏型、重音与气口间隔
+        # 都锁死，同一首内部严格按这套走；不同套之间才拉开听感差别。
+        # 用「seed + 歌词」挑套件：同一个 seed 下不同歌词也会换套，同一首歌每次都一样。
+        picker = random.Random(f"{seed}:{lyrics}")
+        # 抽取顺序与 0.1.20 保持一致（经典节奏下只抽不用），这样换节奏模式时音高逐音不变，
+        # 对比时听到的差异只来自时值。
+        tempo_jitter = picker.uniform(0.92, 1.08)
+        if RHYTHM_MODE == "flow":
+            beat = beat / tempo_jitter
+        scheme = SCHEMES[picker.randrange(len(SCHEMES))]
+        family = MOTIF_FAMILIES.get(scheme["family"], MOTIF_FAMILIES["arch"])
+        pool = family.get(scale) or family["major"]
+        lead = pick_motif(pool, scheme["motif_len"], picker)
+        # 套件之外再由歌词定的自由度：动机整体挪 0–2 级、重音起点挪一格、单句的角色、
+        # 整首的落点（主音 / 三音 / 五度）与收束步幅。规则不变，但换一首歌起音、走向、
+        # 落点、时值都不同。
+        lead = tuple(step + picker.choice((0, 1, 2)) for step in lead)
+        # 一半的歌把整套动机倒过来走（镜像）：起音从动机顶点开口、先下探再回升，和另一半
+        # 「低起上扬」的歌在走向上直接相反；镜像对整首生效，套件内部仍然一致。
+        if picker.random() < 0.5:
+            top = max(lead)
+            lead = tuple(top - step for step in lead)
+        phase = picker.randrange(max(2, scheme["accent"]))
+        stride = picker.choice((1, 2))
+        start = scheme["start"]
+        single_role = picker.choice(("起", "承", "转", "合"))
+        closing = picker.choice((MELODY_TONIC, MELODY_THIRD, 3))
+        short_beats, long_beats = (value * RHYTHM_SCALE for value in scheme["rhythm"])
+        breath_every = rng.randint(*scheme["breath"])
+        role_cycle = ROLE_CYCLES.get(scheme["period"], ROLE_CYCLES[4])
+        tone = self.tone_reader()
+
         notes = []
         sung_text = []
         total = 0.0
         # 整首歌只给一个 lang（diffsinger_utau 的五个阶段都吃同一个）：按音符数最多的语言。
         lang_counts = {}
+        lead_base = start  # 「起」句的音区，留给「合」句做同头换尾
 
-        for phrase in phrases:
-            units, lang = self.phrase_units(phrase)
-            if not units:
-                continue
+        for order, (units, lang) in enumerate(phrases):
             lang_counts[lang] = lang_counts.get(lang, 0) + len(units)
-            # 每个乐句在五声音阶里走一段：起点随机，步进 ±1/0，靠拢中间音。
-            degree = rng.randrange(len(scale_steps))
-            octave = 4
+            last = order == len(phrases) - 1
+            role = "合" if last else role_cycle[order % len(role_cycle)]
+            # 只有一句歌词时不再一律当「合」：按 seed 在起 / 承 / 转 / 合 里挑，
+            # 选到哪一句就用哪一句的轮廓，整首的落点仍按 closing 收。
+            if len(phrases) == 1:
+                role = single_role
+            motif = turn_variant(lead) if role == "转" else lead
+            # 末句的落点从整首选定的主音 / 三音 / 五度里取；中间句按套件的 open / closed。
+            end_options = (closing,) if last else ((MELODY_THIRD, 3) if scheme["cadence"] == "open" else (MELODY_TONIC,))
+            base, end = phrase_range(role, motif, start, end_options)
+            if order == 0:
+                lead_base = base
+            count = len(units)
+            if role == "合" and count >= 4:
+                # 合句沿用起句的开头（同头），抬高 1–3 级再一路走回收束音（换尾）。抬高幅度按
+                # 剩余音域封顶，不会被 MELODY_HIGH 削平；同头至少留三个音，第三音仍是动机原走向。
+                head_len = min(max(3, picker.choice((count // 2, count // 2 + 1, count - 2))), count - 1)
+                head_cap = MELODY_HIGH - max(lead[:head_len])
+                head_base = max(0, min(head_cap, lead_base + picker.choice((1, 2, 3))))
+                head = [head_base + step for step in lead[:head_len]]
+                tail_end = end
+                if tail_end >= min(head):
+                    tail_end = min([d for d in (MELODY_TONIC, MELODY_THIRD, 3) if d < min(head)] or [MELODY_TONIC])
+                degrees = head + descending_tail(head[-1], tail_end, count - len(head) + 1, stride)[1:]
+                end = tail_end
+                degrees = polish(degrees, end)
+            else:
+                degrees = motif_degrees(motif, count, base, end)
+            accent = scheme["turn_acc"] if role == "转" else scheme["accent"]
+            if RHYTHM_MODE == "classic":
+                # 原版断句：每字半拍、每句末字一拍，没有句内/句间气口。
+                durs = [0.5] * (count - 1) + [1.0]
+            else:
+                body = phrase_rhythm(count, short_beats, long_beats, accent, phase)
+                ratio = FINAL_TAIL_RATIO if last else PHRASE_TAIL_RATIO
+                durs = body + [phrase_tail(body, ratio)]
+            offsets = tone_bias([grapheme for grapheme, _ in units], degrees, tone)
+
+            cut = False
             for index, (grapheme, phonemes) in enumerate(units):
-                dur = beat * (1.0 if index == len(units) - 1 else 0.5)
+                dur = beat * durs[index]
                 if total + dur > max_seconds:
+                    cut = True
                     break
-                midi = base + 12 * (octave - 4) + scale_steps[degree]
                 notes.append({
                     "phones": phonemes,
-                    "midi": midi,
+                    "midi": pentatonic_midi(root, degrees[index], scale_steps) + offsets[index],
                     "dur": dur,
                     "rest": False,
                 })
                 sung_text.append(grapheme)
                 total += dur
-                step = rng.choices([-1, 0, 1], weights=[3, 4, 3])[0]
-                if degree + step < 0 or degree + step >= len(scale_steps):
-                    step = -step
-                degree += step
-                if degree >= len(scale_steps):
-                    degree -= len(scale_steps)
-                    octave = min(5, octave + 1)
-                elif degree < 0:
-                    degree += len(scale_steps)
-                    octave = max(3, octave - 1)
-            if total + beat * 0.5 <= max_seconds and notes:
-                notes.append({"phones": ["SP"], "midi": None, "dur": beat * 0.5, "rest": True})
-                total += beat * 0.5
-            if total >= max_seconds:
+                # 句内气口：每 4–6 个字换一口气，句尾两个音不切（经典节奏不插气口）。
+                if RHYTHM_MODE == "flow" and index < count - 2 and (index + 1) % breath_every == 0:
+                    gap = beat * INNER_BREATH_BEATS
+                    if total + gap <= max_seconds:
+                        notes.append({"phones": ["SP"], "midi": None, "dur": gap, "rest": True})
+                        total += gap
+            if cut:
                 break
+            if RHYTHM_MODE == "flow" and total + beat * BREATH_BEATS <= max_seconds:
+                notes.append({"phones": ["SP"], "midi": None, "dur": beat * BREATH_BEATS, "rest": True})
+                total += beat * BREATH_BEATS
 
         # 去掉结尾多出来的休止
         while notes and notes[-1]["rest"]:
@@ -841,7 +1306,7 @@ class Singer:
             key_shift=0,  # 旋律里已经按 keyShift 生成
             pitch_steps=int(job.get("pitchSteps") or 10),
             variance_steps=int(job.get("varianceSteps") or 10),
-            acoustic_steps=int(job.get("acousticSteps") or 20),
+            acoustic_steps=int(job.get("acousticSteps") or 40),
             gender=float(job.get("gender") or 0),
             output_dir=str(work),
             save_intermediate=False,

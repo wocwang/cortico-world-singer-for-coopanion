@@ -6,7 +6,7 @@ const TEXT = {
     serviceTitle: '服务',
     serviceHint: 'DiffSinger 唱歌引擎、派生 venv 与声库的状态；首次使用先点「一键安装」。引擎随插件启动，可在面板手动「停止服务」还内存（约 1.3 GB）、再「启动服务」。占用：默认自动——有 NVIDIA 显卡且依赖齐了就用显卡（约 0.8 GB 显存），否则纯 CPU（不占显存）；引擎载入约 2–11 秒。与 gpt-sovits（说话）、RVC（换音色）配合使用。',
     singTitle: '演唱',
-    singHint: '输入一句歌词，程序按调式自动配旋律唱出来。中文写汉字，日语写假名，英语按单词（都要先换成带对应词典的声库）；标点断句，其余字符不唱。',
+    singHint: '让大肥鱼临场发挥、随意唱歌：写一句词（对话里它自己现编），程序按起承转合现场配旋律唱出来。中文写汉字，日语写假名，英语按单词（都要先换成带对应词典的声库）；标点断句，其余字符不唱。',
     rowEngine: '引擎',
     rowDeps: '依赖',
     rowVoicebank: '声库',
@@ -85,13 +85,13 @@ const TEXT = {
     saved: (path: string) => `已存到 ${path}`,
     rvcTag: '（RVC 音色）',
     download: '下载 wav',
-    hint: '旋律按调式随机游走生成；同一歌词 + 同一速度/调式会得到同一条旋律。',
+    hint: '旋律按起承转合生成：每句一个拱形（上行—顶点—下行），句末落在主音、三音或五度；不同歌词走不同旋律，同一歌词 + 同一速度/调式会得到同一条旋律。',
   },
   en: {
     serviceTitle: 'Service',
     serviceHint: 'DiffSinger engine, derived venv and voicebank. Click "Install" on first use. The engine starts with the plugin; use Stop service to release its memory (about 1.3 GB) and Start service to bring it back. Footprint: auto by default — the GPU (about 0.8 GB VRAM) when an NVIDIA GPU and its dependencies are ready, otherwise pure CPU (no VRAM); engine load takes 2–11 s. Works together with gpt-sovits (speech) and RVC (timbre).',
     singTitle: 'Sing',
-    singHint: 'Type a line of lyrics; the melody is generated in the chosen scale. Chinese uses Han characters, Japanese uses kana, English uses words — each needs a voicebank that ships the matching dictionary. Punctuation splits phrases; other characters are skipped.',
+    singHint: 'Let the pet improvise and sing on the spot: type a line (the chat can write it too); the melody is built as a four-phrase arc in the chosen scale. Chinese uses Han characters, Japanese uses kana, English uses words — each needs a voicebank that ships the matching dictionary. Punctuation splits phrases; other characters are skipped.',
     rowEngine: 'Engine',
     rowDeps: 'Dependencies',
     rowVoicebank: 'Voicebank',
@@ -169,7 +169,7 @@ const TEXT = {
     saved: (path: string) => `Saved to ${path}`,
     rvcTag: ' (RVC timbre)',
     download: 'Download wav',
-    hint: 'The melody is a seeded random walk in the chosen scale: same lyrics + tempo + scale gives the same melody.',
+    hint: 'The melody follows a four-part arc in the chosen scale — each phrase rises to a peak and falls, ending on the tonic, third or fifth; different lyrics get different melodies, while the same lyrics + tempo + scale gives the same melody.',
   },
 };
 

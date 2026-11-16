@@ -124,7 +124,7 @@ export const COLOR_OPTIONS = `${SINGER_ID}:color`;
 const TEXT = {
   zh: {
     title: 'DiffSinger 唱歌',
-    groupSing: { title: '唱歌参数', description: '默认速度、移调与调式；面板里每次演唱还可以逐次覆盖。' },
+    groupSing: { title: '唱歌参数', description: '大肥鱼临场唱时的默认速度、移调与调式；面板里每次演唱还可以逐次覆盖。' },
     groupRvc: { title: 'RVC 后处理', description: '把绮萱的干声再送进 RVC 换成小肥鱼/星落落大肥鱼的音色。多一趟推理，默认关闭。' },
     groupService: { title: '运行与接口', description: '派生 venv、声库目录，以及给其他插件和外部大模型用的本机 HTTP 接口。' },
     tier: { title: '推理档', description: '自动：检测到 NVIDIA 显卡就借显卡档运行时，否则 CPU 档。它只决定派生 venv 用哪套运行时（CUDA / cuDNN 在显卡档里）；是否真的用显卡推理由下面的「推理设备」决定。改完在面板点「重启引擎」生效，切档会自动重建 venv。' },
@@ -139,7 +139,7 @@ const TEXT = {
     deviceCpu: 'CPU',
     bpm: { title: '默认速度（BPM）', description: '60..200；每字时值按拍折算。' },
     keyShift: { title: '默认移调（半音）', description: '−12..12，正数更高。绮萱是女声，一般 0 到 +4。' },
-    scale: { title: '默认调式', description: '大调明亮，小调忧郁；旋律由程序按调式自动生成。' },
+    scale: { title: '默认调式', description: '大调明亮，小调忧郁；旋律按起承转合在所选调式里生成。' },
     scaleMajor: '大调',
     scaleMinor: '小调',
     rvcEnabled: { title: '启用 RVC 后处理', description: '开着时干声会 POST 给 RVC 插件（默认 127.0.0.1:9881）再返回。RVC 插件没装或没就绪时，本次退回绮萱原声，不报错。' },
@@ -159,7 +159,7 @@ const TEXT = {
   },
   en: {
     title: 'DiffSinger Singing',
-    groupSing: { title: 'Singing', description: 'Default tempo, transpose and scale; the panel can override them per performance.' },
+    groupSing: { title: 'Singing', description: 'Default tempo, transpose and scale for the pet singing on the spot; the panel can override them per performance.' },
     groupRvc: { title: 'RVC post-processing', description: 'Send the dry Qixuan vocal through RVC to get the DaFeiyu timbre. One extra inference pass; off by default.' },
     groupService: { title: 'Runtime and API', description: 'Derived venv, voicebank folder, and the loopback HTTP endpoint for other plugins and online LLMs.' },
     tier: { title: 'Inference tier', description: 'Auto borrows the GPU runtime when an NVIDIA GPU is detected, otherwise CPU. It only picks which runtime the derived venv is based on (CUDA / cuDNN live in the GPU tier); whether inference itself runs on the GPU is decided by Inference device below. After changing this, click Restart engine — switching tiers rebuilds the venv automatically.' },
@@ -174,7 +174,7 @@ const TEXT = {
     deviceCpu: 'CPU',
     bpm: { title: 'Default tempo (BPM)', description: '60..200; note lengths are derived from the beat.' },
     keyShift: { title: 'Default transpose (semitones)', description: '−12..12, positive is higher. Qixuan is a female voice, usually 0 to +4.' },
-    scale: { title: 'Default scale', description: 'Major is bright, minor is moody; the melody is generated in that scale.' },
+    scale: { title: 'Default scale', description: 'Major is bright, minor is moody; the melody follows a four-phrase arc in that scale.' },
     scaleMajor: 'Major',
     scaleMinor: 'Minor',
     rvcEnabled: { title: 'Enable RVC post-processing', description: 'When on, the dry vocal is POSTed to the RVC plugin (127.0.0.1:9881 by default). If RVC is missing or not ready, this run falls back to the raw Qixuan voice instead of failing.' },

@@ -51,7 +51,7 @@ describe('参数校验', () => {
     const job = readSingJob({ lyrics: '  晚风吹过旧时光  ' });
     expect(job).toMatchObject({
       lyrics: '晚风吹过旧时光', bpm: 96, keyShift: 0, scale: 'major', seed: 0,
-      pitchSteps: 10, varianceSteps: 10, acousticSteps: 20, gender: 0,
+      pitchSteps: 10, varianceSteps: 10, acousticSteps: 40, gender: 0,
       maxSeconds: 60, speaker: '', save: false, base64: false,
     });
   });

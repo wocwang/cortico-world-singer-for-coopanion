@@ -5,8 +5,9 @@
  * 1. 常驻 Python worker（`src/python/worker.py`，见 engine.ts）——载入声库，之后每首歌只走推理；
  * 2. 本机 HTTP 接口（server.ts，默认 127.0.0.1:9882）——给其他插件与外部大模型用。
  *
- * 工具 `singer_sing` 给桌宠 / 对话页用：合成完把 PCM 写进本机声卡才回执；提示词要求先调它、
- * 紧接着 `pet_say`，气泡与声音同时开始（见 Pal-AI-Lab/Coopanion#538）。QQ 点歌仍走 qq_send + voice=true。
+ * 工具 `singer_sing` 给桌宠 / 对话页用：合成（可选过 RVC）完把 PCM 写进本机声卡才回执，
+ * 回执正文就是这句歌词；提示词要求先调它、拿到回执后再 `pet_say` 同一句，气泡与声音一起出现。
+ * QQ 点歌仍走 qq_send + voice=true。
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -29,7 +30,7 @@ import {
   type SingDeps, type SingJob, type SingOutcome, type SingServerHandle,
 } from './server.ts';
 import { SingerVenv } from './venv.ts';
-import { bankInfo, languageLabel, scanBanks, type BankInfo } from './banks.ts';
+import { bankInfo, languageLabel, scanBanks, voiceName, type BankInfo } from './banks.ts';
 import { RuntimeInstall, installedTiers } from './runtime.ts';
 import { panelText } from './webui/text.ts';
 import { VOCODER_PAGE, VOICEBANK_PAGE, VOICEBANK_VERSION } from './catalog.ts';
@@ -38,10 +39,18 @@ const WORKER_SCRIPT = fileURLToPath(new URL('./python/worker.py', import.meta.ur
 /** 告诉模型「在哪唱歌、怎么点歌」的环境提示词模板。 */
 const ENV_PROMPT_PATH = fileURLToPath(new URL('../prompts/env.md', import.meta.url));
 const VERSION = '0.1.16';
-/** `singer_sing` 等这一句唱进声卡的上限：DiffSinger 是整句批式合成（实测 0.5–11 秒），留足余量。 */
-const SING_ALOUD_MAX_MS = 60_000;
+/** `singer_sing` 等这一句唱进声卡的上限：整句批式合成 0.5–11 秒，再加 RVC 最多 20 秒，留足余量。 */
+const SING_ALOUD_MAX_MS = 90_000;
 /** 换声库时最多等旧引擎把排队的句子唱完（超时也照样切，别把用户卡死）。 */
 const SWITCH_DRAIN_MS = 180_000;
+/** 桌宠外放时给 RVC 的等待上限：超时就播原声，别把「气泡等声音」一起拖住。 */
+const RVC_ALOUD_MS = 20_000;
+
+/** 一次演唱的可选行为；接口与面板走默认值，桌宠外放压短 RVC 的等待。 */
+interface SingOptions {
+  /** RVC 的等待上限（毫秒）；不传用 rvcPost 的默认值。 */
+  rvcTimeoutMs?: number;
+}
 
 export interface SingerWorldOptions {
   cfg: SingerConfigSection;
@@ -178,6 +187,11 @@ export class SingerWorld implements World {
     at: number; ms: number; bytes: number; seconds: number; notes: number;
     sungChars: number; savedPath: string | null; bpm: number; keyShift: number; scale: string; rvc: boolean;
   } | null = null;
+  /**
+   * 对话里说「唱慢一点 / 调高点 / 换小调」时改的值：当次生效，后续句子继续沿用，
+   * 直到再改一次。只在内存里，不写配置文件（用户要长期默认仍去设置页）。
+   */
+  private tune: { bpm?: number; keyShift?: number; scale?: 'major' | 'minor' } = {};
 
   constructor(opts: SingerWorldOptions) {
     this.opts = opts;
@@ -220,7 +234,7 @@ export class SingerWorld implements World {
       promptDocs: [{
         key: `worlds.${SINGER_ID}.envPrompt`,
         title: `${worldLabel(language)} · 环境提示词`,
-        description: 'QQ 点歌用 qq_send + voice=true；桌宠 / 对话页用 singer_sing，紧跟 pet_say。',
+        description: 'QQ 点歌用 qq_send + voice=true；桌宠 / 对话页先 singer_sing，等回执后 pet_say 同一句歌词；速度 / 调式 / 移调可以直接在对话里改。',
         path: ENV_PROMPT_PATH,
         role: 'envPrompt',
         vars: [{ name: 'singer.state', description: '唱歌引擎此刻的状态（就绪 / 启动中 / 出错 / 未启动）。' }],
@@ -506,12 +520,12 @@ export class SingerWorld implements World {
       name: 'DiffSinger 唱歌',
       version: VERSION,
       voicebank: this.activeBank
-        ? `${this.activeBank.label} [${this.activeBank.languages.join('/')}]${this.activeBank.colors.length ? ` ${this.activeBank.colors.join('/')}` : ''}`
+        ? `${voiceName(this.activeBank)} [${this.activeBank.languages.join('/')}]${this.activeBank.colors.length ? ` ${this.activeBank.colors.join('/')}` : ''}`
         : `Qixuan v${VOICEBANK_VERSION}`,
       method: 'POST',
       path: '/sing',
       contentType: 'application/json',
-      note: '歌词进，wav 出；中文写汉字、日语写假名（需日语声库）、英语写单词（需带英语词典的声库），标点断句，其余字符不唱。旋律由程序按调式自动生成。配置里换了声库，下一句自动换引擎，不用重启。',
+      note: '歌词进，wav 出；中文写汉字、日语写假名（需日语声库）、英语写单词（需带英语词典的声库），标点断句，其余字符不唱。旋律按起承转合在所选调式里生成（每句拱形，句末落主音、三音或五度）。配置里换了声库，下一句自动换引擎，不用重启。',
       params: {
         lyrics: { type: 'string', required: true, maxLength: LYRICS_MAX, description: '要唱的歌词，例如「晚风吹过旧时光」；日语写假名，英语用空格分词' },
         bpm: { type: 'integer', default: cfg.bpm, min: 60, max: 200, description: '速度；每字半拍、句末一字一拍' },
@@ -520,7 +534,7 @@ export class SingerWorld implements World {
         seed: { type: 'integer', default: 0, description: '旋律种子；0 表示按歌词固定取值，同一歌词同一条旋律' },
         pitchSteps: { type: 'integer', default: 10, min: STEPS_MIN, max: STEPS_MAX, description: '音高扩散步数，小一点更快' },
         varianceSteps: { type: 'integer', default: 10, min: STEPS_MIN, max: STEPS_MAX, description: '方差扩散步数' },
-        acousticSteps: { type: 'integer', default: 20, min: STEPS_MIN, max: STEPS_MAX, description: '声学扩散步数，小一点更快、更糙' },
+        acousticSteps: { type: 'integer', default: 40, min: STEPS_MIN, max: STEPS_MAX, description: '声学扩散步数，小一点更快、更糙' },
         gender: { type: 'number', default: 0, min: -1, max: 1, description: '音色性别参数，−1 偏男、1 偏女' },
         maxSeconds: { type: 'number', default: 60, min: MAX_SECONDS_MIN, max: MAX_SECONDS_MAX, description: '最长时长，超出就截断乐句' },
         speaker: { type: 'string', default: cfg.voiceColor || '', description: '音色（声库自带，如 Normal / Soft）；留空用配置里的默认音色' },
@@ -541,12 +555,12 @@ export class SingerWorld implements World {
   }
 
   /** 一次演唱：临时 wav 进、内存 wav 出；`save=1` 时另存到 `<dataDir>/out`。 */
-  private sing(job: SingJob): Promise<SingOutcome> {
+  private sing(job: SingJob, opts: SingOptions = {}): Promise<SingOutcome> {
     // 有活就不回收；唱完再重新计时。
     this.cancelIdle();
     this.singBusy += 1;
     // 串行：同一时刻只唱一句；配置里换了声库，也排在这一句唱完之后再换。
-    const run = (): Promise<SingOutcome> => this.singOnce(job);
+    const run = (): Promise<SingOutcome> => this.singOnce(job, opts);
     const next = this.singChain.then(run, run);
     this.singChain = next.catch(() => undefined);
     return next.finally(() => {
@@ -575,22 +589,28 @@ export class SingerWorld implements World {
     }
     let job: SingJob;
     try {
-      // 工具只给 lyrics：速度 / 调式 / 移调取配置里的默认值，时长压到 30 秒内（桌宠里一句不会太长）。
+      // 工具可带 bpm / keyShift / scale（「唱慢一点」「调高点」由模型透传）；
+      // 没带就沿用上一次对话里改的值，再没有才用配置。时长压到 30 秒内（桌宠里一句不会太长）。
       job = readSingJob({
         ...args,
         save: false,
         base64: false,
-        bpm: this.opts.cfg.bpm,
-        keyShift: this.opts.cfg.keyShift,
-        scale: this.opts.cfg.scale,
+        bpm: args.bpm ?? this.tune.bpm ?? this.opts.cfg.bpm,
+        keyShift: args.keyShift ?? this.tune.keyShift ?? this.opts.cfg.keyShift,
+        scale: args.scale ?? this.tune.scale ?? this.opts.cfg.scale,
         maxSeconds: 30,
       });
     } catch (err) {
       return { text: `Nothing sung: ${err instanceof Error ? err.message : String(err)}.`, failed: true };
     }
+    // 这次显式给了的参数记住，后面的话按新参数唱（用户不必去设置页）。
+    if (args.bpm !== undefined) this.tune.bpm = job.bpm;
+    if (args.keyShift !== undefined) this.tune.keyShift = job.keyShift;
+    if (args.scale !== undefined) this.tune.scale = job.scale;
     let out: SingOutcome;
     try {
-      out = await this.sing(job);
+      // 外放链路：RVC 最多等 20 秒，超时或失败就直接播原声，不让这一句卡住。
+      out = await this.sing(job, { rvcTimeoutMs: RVC_ALOUD_MS });
     } catch (err) {
       return { text: `Nothing sung: ${err instanceof Error ? err.message : String(err)}.`, failed: true };
     }
@@ -610,8 +630,10 @@ export class SingerWorld implements World {
         failed: true,
       };
     }
-    this.log?.info('桌宠里唱了一句', { seconds: out.seconds, ms: out.ms, bytes: out.audio.length });
-    return { text: `Sang one line (${out.seconds.toFixed(1)} s) on this computer.` };
+    this.log?.info('桌宠里唱了一句', { seconds: out.seconds, ms: out.ms, bytes: out.audio.length, rvc: out.rvc });
+    // 回执正文就是这一句歌词：模型原样交给 pet_say，气泡内容与这次唱的一致，
+    // 而且此刻第一块 PCM 已经进了声卡输出流，气泡不会跑到声音前面。
+    return { text: job.lyrics };
   }
 
   /** 配置里的声库变了就地重建引擎；音色每句现读，不用重启。 */
@@ -659,7 +681,7 @@ export class SingerWorld implements World {
     }
   }
 
-  private async singOnce(job: SingJob): Promise<SingOutcome> {
+  private async singOnce(job: SingJob, opts: SingOptions = {}): Promise<SingOutcome> {
     if (!this.serviceOn) throw new SingerError('unavailable', '推理服务未启动：在「服务」页点「启动服务」');
     // 闲置回收后第一次唱：先把它拉回来（服务仍是开着的）。
     await this.ensureReady();
@@ -696,9 +718,19 @@ export class SingerWorld implements World {
           pitch: job.keyShift,
           indexRate: this.opts.cfg.rvcIndexRate,
           protect: this.opts.cfg.rvcProtect,
+          timeoutMs: opts.rvcTimeoutMs,
         });
-        if (converted) { audio = converted; rvc = true; }
-        else this.log?.warn('RVC 后处理没成功，本次用绮萱原声', { endpoint: this.opts.cfg.rvcEndpoint });
+        // 外放链路的要求是「RVC 失败也照样有声音」：没返回、超时、或者换出来的
+        // 不是单声道 16-bit PCM，都退回干声，这一句不中断。
+        const head = converted ? parseWavHeader(converted) : null;
+        if (converted && head && head.channels === 1 && head.bitsPerSample === 16) {
+          audio = converted;
+          rvc = true;
+        } else if (converted) {
+          this.log?.warn('RVC 返回的音频不是单声道 16-bit，本次用绮萱原声', { endpoint: this.opts.cfg.rvcEndpoint });
+        } else {
+          this.log?.warn('RVC 后处理没成功，本次用绮萱原声', { endpoint: this.opts.cfg.rvcEndpoint });
+        }
       }
       let savedPath: string | undefined;
       if (job.save) {
@@ -778,12 +810,12 @@ export class SingerWorld implements World {
       voicebankDir: this.voicebankDir,
       voicebankName: this.voicebankDir ? basename(this.voicebankDir) : '',
       bank: this.activeBank
-        ? { name: this.activeBank.name, label: this.activeBank.label, languages: this.activeBank.languages, colors: this.activeBank.colors }
+        ? { name: this.activeBank.name, label: voiceName(this.activeBank), languages: this.activeBank.languages, colors: this.activeBank.colors }
         : null,
       banksDir: this.banksDir,
       banks: scanBanks(this.banksDir).map((bank) => ({
         name: bank.name,
-        label: bank.label,
+        label: voiceName(bank),
         languages: bank.languages,
         colors: bank.colors,
         active: bank.name === (this.activeBank?.name ?? ''),
@@ -795,8 +827,12 @@ export class SingerWorld implements World {
       runtime: this.runtime?.status() ?? null,
       runtimeTiers: installedTiers(this.runtimesRoot),
       install: installer?.status() ?? { phase: 'absent', done: 0, total: 0, detail: 'World 未启动' },
-      // 面板表单的初值，跟配置里的默认值一致。
-      defaults: { bpm: this.opts.cfg.bpm, keyShift: this.opts.cfg.keyShift, scale: this.opts.cfg.scale },
+      // 面板表单的初值：对话里改过速度 / 调式 / 移调的话，这里也跟着变。
+      defaults: {
+        bpm: this.tune.bpm ?? this.opts.cfg.bpm,
+        keyShift: this.tune.keyShift ?? this.opts.cfg.keyShift,
+        scale: this.tune.scale ?? this.opts.cfg.scale,
+      },
       rvc: { enabled: this.opts.cfg.rvcEnabled, endpoint: this.opts.cfg.rvcEndpoint, voice: this.opts.cfg.rvcVoice },
       lastSing: this.lastSing,
       models: this.modelInventory(),

@@ -8,15 +8,15 @@ import {
   deviceOptions, scaleOptions, tierOptions,
   type SingerConfigSection,
 } from './config.ts';
-import { bankInfo, languageLabel, scanBanks } from './banks.ts';
+import { bankInfo, scanBanks, voiceName } from './banks.ts';
 import { SingerWorld } from './world.ts';
 import { SINGER_TOOL_DECLS } from './tools.ts';
 
 const DESCRIBE: WorldDescribe = {
   tools: describeTools(SINGER_TOOL_DECLS, {
     singer_sing: {
-      zh: '在本机把一句歌词唱出来，紧跟 pet_say 调用，气泡与声音同时开始。',
-      en: 'Sings one lyric line on this computer, right before the pet_say that shows the same line, so the bubble appears as the voice begins.',
+      zh: '在本机把一句歌词唱出来；等它返回后再 pet_say 同一句歌词，气泡与声音同时出现。',
+      en: 'Sings one lyric line on this computer; call pet_say with the returned line afterwards, so the bubble appears together with the voice.',
     },
   }),
   events: [],
@@ -44,12 +44,12 @@ function activeBank() {
 }
 
 function bankOptions(language: Language): Array<{ value: string; label: string }> {
-  const fallback = language === 'zh' ? '默认（声库目录 / 绮萱）' : 'Default (Voicebank folder / Qixuan)';
+  const fallback = language === 'zh' ? '默认（声库目录 / 绮萱（中））' : 'Default (Voicebank folder / Qixuan (ZH))';
   const options = [{ value: '', label: fallback }];
   for (const bank of scanBanks(bankLibraryDir())) {
-    const langs = languageLabel(bank.languages, language);
+    // 名字里已经带了「中/日/英」标记，这里只再补上音色，不重复语言的完整写法。
     const colors = bank.colors.length ? ` · ${bank.colors.join(' / ')}` : '';
-    options.push({ value: bank.name, label: `${bank.label}（${langs}${colors}）` });
+    options.push({ value: bank.name, label: `${voiceName(bank, language)}${colors}` });
   }
   return options;
 }
