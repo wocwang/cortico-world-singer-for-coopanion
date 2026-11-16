@@ -137,15 +137,27 @@ describe('singer_sing 工具', () => {
     expect(tool.parameters).toMatchObject({ type: 'object', required: ['lyrics'] });
   });
 
-  it('推理服务停着：不合成、回执提示去点启动服务', async () => {
+  it('手动停服务：桌宠调用不覆盖，不合成并说明原因', async () => {
     const { fake, world, invoke } = makeWorld();
     await world.start({ log } as unknown as WorldHost);
     await nextTick();
     await invoke('stop');
     const out = await call(world, { lyrics: '晚风' });
     expect(out.failed).toBe(true);
-    expect(out.text).toContain('启动服务');
+    expect(out.text).toContain('stopped manually');
     expect(fake.songs.length).toBe(0);
+  });
+
+  it('随启动关闭 / 引擎停着：桌宠调用先拉起再唱', async () => {
+    const { fake, world } = makeWorld({ cfg: { autoStart: false } });
+    await world.start({ log } as unknown as WorldHost);
+    await nextTick();
+    expect(fake.starts).toBe(0);
+    const out = await call(world, { lyrics: '晚风' });
+    expect(out.failed).toBeUndefined();
+    expect(out.text).toBe('晚风');
+    expect(fake.starts).toBe(1);
+    expect(fake.songs.length).toBe(1);
   });
 
   it('没给歌词：回失败并写明缺 lyrics', async () => {

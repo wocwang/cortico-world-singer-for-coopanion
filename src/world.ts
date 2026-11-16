@@ -157,6 +157,8 @@ export class SingerWorld implements World {
   private launchDetail = '';
   /** 引擎是「闲置回收」停的（不是用户手动停服务）：下一条请求要能自动拉回来。 */
   private idleStopped = false;
+  /** 用户在面板手动点了「停止服务」：桌宠 / 对话页的调用默认不覆盖这个意图。 */
+  private serviceHeld = false;
   private idleTimer: NodeJS.Timeout | undefined;
   /** 正在执行 stop() 的那一小段：请求要等它结束再决定是否拉回。 */
   private idleSleep: Promise<void> | undefined;
@@ -248,6 +250,7 @@ export class SingerWorld implements World {
     this.log = host.log;
     this.player = this.opts.createPlayer ? this.opts.createPlayer(host.log) : new Player(host.log);
     this.stopped = false;
+    this.serviceHeld = false;
     this.launchDetail = '';
     this.setup();
     // 随 Coopanion 启动就看配置；关掉时插件仍加载，但引擎与接口先不启动，面板随时可以手动开。
@@ -332,6 +335,7 @@ export class SingerWorld implements World {
   private startService(): void {
     if (this.stopped) return;
     this.serviceOn = true;
+    this.serviceHeld = false;
     this.idleStopped = false;
     this.launchDetail = '';
     // 手动启停等同一次重试：上次换声库失败的目录可以再试一次。
@@ -343,6 +347,7 @@ export class SingerWorld implements World {
   /** 面板「停止服务」：停引擎、关接口；World 仍挂着，下次点「启动服务」再回来。 */
   private async stopService(): Promise<void> {
     this.serviceOn = false;
+    this.serviceHeld = true;
     this.idleStopped = false;
     this.cancelIdle();
     const server = this.server;
@@ -433,22 +438,66 @@ export class SingerWorld implements World {
   }
 
   /**
-   * 回收后自动拉回：只处理「闲置停」这一种停止。
-   * 手动停服务、未装声库、启动失败都保持原来的 409/未就绪语义，不在这里偷偷重试。
+   * 按需拉回：闲置回收、服务开着但引擎停着（含启动时没预热）都能拉起。
+   * 手动停服务（serviceOn=false）、未装声库、启动失败保持原有语义，不在这里偷偷重试。
    */
-  async ensureReady(): Promise<void> {
+  async ensureReady(timeoutMs = 0): Promise<void> {
     if (this.stopped || !this.serviceOn) return;
     const engine = this.engine;
     if (!engine || engine.ready()) return;
     // 正在执行闲置回收：等 stop() 结束（期间请求排队，不吃 409）。
     if (this.idleSleep) await this.idleSleep.catch(() => undefined);
     // 已经在启动中（自动启动或别的请求触发）：一起等，避免并发请求被 409 打回。
-    if (this.starting) await this.starting.catch(() => undefined);
+    if (this.starting) await this.waitStarting(timeoutMs);
     if (engine.ready()) return;
-    if (!this.idleStopped || engine.state().phase !== 'stopped') return;
+    if (engine.state().phase !== 'stopped') return;
     this.idleStopped = false;
     this.bootEngine();
-    await this.starting?.catch(() => undefined);
+    await this.waitStarting(timeoutMs);
+  }
+
+  /** 等引擎启动完成；`timeoutMs>0` 时超时返回错误，后台启动本身继续。 */
+  private async waitStarting(timeoutMs: number): Promise<void> {
+    const starting = this.starting;
+    if (!starting) return;
+    if (timeoutMs <= 0) {
+      await starting.catch(() => undefined);
+      return;
+    }
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        starting.catch(() => undefined),
+        new Promise<void>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`engine start took longer than ${Math.round(timeoutMs / 1000)} s`)), timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 桌宠 / 对话页调用前的「先拉起再执行」。
+   * 服务是手动停的就不覆盖；随机启动关着、闲置回收、引擎意外停着都会拉起并等就绪。
+   */
+  async ensureServiceForTool(timeoutMs = 60_000): Promise<{ ok: boolean; reason?: string }> {
+    if (this.stopped) return { ok: false, reason: 'the singer world is stopped' };
+    if (!this.serviceOn) {
+      if (this.serviceHeld) return { ok: false, reason: 'the singing service was stopped manually; start it on the Service page first' };
+      this.startService();
+    }
+    if (this.engine?.ready()) return { ok: true };
+    let timeout = '';
+    try {
+      await this.ensureReady(timeoutMs);
+    } catch (err) {
+      timeout = err instanceof Error ? err.message : String(err);
+    }
+    if (this.engine?.ready()) return { ok: true };
+    const detail = this.engine?.state().detail || this.launchDetail || timeout;
+    return { ok: false, reason: detail || 'the singing engine did not become ready' };
   }
 
   /** 面板/接口共用：此刻引擎状态。 */
@@ -581,11 +630,10 @@ export class SingerWorld implements World {
   }
 
   private async singAloudOnce(args: Record<string, unknown>): Promise<ToolOutcome> {
-    if (!this.serviceOn) {
-      return {
-        text: 'No sound: the singing service is stopped. Ask the owner to press "启动服务" on the DiffSinger page.',
-        failed: true,
-      };
+    // 引擎没起（随机启动关着 / 闲置回收 / 意外停着）就先拉起再唱；手动停服务不覆盖。
+    const ready = await this.ensureServiceForTool();
+    if (!ready.ok) {
+      return { text: `No sound: ${ready.reason}.`, failed: true };
     }
     let job: SingJob;
     try {
@@ -976,6 +1024,7 @@ export class SingerWorld implements World {
     if (this.stopped) return;
     // 点「重启引擎」就等于要把服务开着：停了也能从这里启回来。
     this.serviceOn = true;
+    this.serviceHeld = false;
     this.idleStopped = false;
     this.cancelIdle();
     await this.engine?.stop();
