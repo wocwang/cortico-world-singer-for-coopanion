@@ -12,6 +12,12 @@ export type SingerDevice = 'auto' | 'cpu' | 'cuda';
 /** 旋律调式：大调 / 小调。小调更忧郁，大调更亮。 */
 export type SingerScale = 'major' | 'minor';
 
+/** 闲置分钟转毫秒：支持小数（0.5 = 30 秒），0 / 非法值表示不回收。 */
+export function idleDelayMs(minutes: unknown): number {
+  const value = Number(minutes);
+  return Number.isFinite(value) && value > 0 ? Math.round(value * 60_000) : 0;
+}
+
 /** config.json 的 `worlds.singer` 段。 */
 export interface SingerConfigSection {
   enabled: boolean;
@@ -133,7 +139,7 @@ const TEXT = {
     tierCpu: 'CPU',
     device: { title: '推理设备', description: '自动：显卡档运行时、派生 venv 里的 onnxruntime-gpu 与 NVIDIA 显卡都齐了就用显卡，缺一样退回 CPU。显卡推理多占约 0.8 GB 显存，热跑快约 6 倍；首次载入会热身一句，之后每句都不等。切到显卡后第一次「重启引擎」会补装 onnxruntime-gpu（约 215 MB，走阿里云镜像）。' },
     autoStart: { title: '随 Coopanion 启动服务', description: '开着时插件随 Coopanion 一起拉起唱歌引擎与本机接口；关掉后启动时不预热，省内存，但面板生成、桌宠唱歌和 9882 请求仍会按需拉起。手动点「停止服务」后不会被自动拉起。' },
-    idleMinutes: { title: '闲置回收（分钟）', description: '多久没有唱歌就停掉引擎子进程、释放内存；0 表示不回收（默认，保持旧行为）。只回收引擎，9882 接口照常监听，下一条请求会自动重新拉起。手动点「停止服务」后不会自动重启，也不会被桌宠拉起。' },
+    idleMinutes: { title: '闲置回收（分钟）', description: '多久没有唱歌就停掉引擎子进程、释放内存；支持小数，例如 0.5 = 30 秒，按秒计时。0 表示不回收（默认，保持旧行为）。只回收引擎，9882 接口照常监听，下一条请求会自动重新拉起；桌宠按需拉起的引擎也照此回收。手动点「停止服务」后不会自动重启，也不会被桌宠拉起。' },
     deviceAuto: '自动',
     deviceCuda: '显卡（NVIDIA）',
     deviceCpu: 'CPU',
@@ -168,7 +174,7 @@ const TEXT = {
     tierCpu: 'CPU',
     device: { title: 'Inference device', description: 'Auto uses the GPU when the GPU runtime, onnxruntime-gpu in the derived venv and an NVIDIA GPU are all present; otherwise CPU. GPU inference takes about 0.8 GB of VRAM and is roughly 6x faster once warm; the engine sings a short warm-up line after loading, so the first real line never waits. Switching to GPU makes the next Restart engine install onnxruntime-gpu (~215 MB, Aliyun mirror first).' },
     autoStart: { title: 'Start the service with Coopanion', description: 'On brings the singing engine and the loopback API up with Coopanion. Off skips the warm-up to save memory, but panel generations, pet song requests and 9882 requests still start it on demand. A manual Stop service is never overridden.' },
-    idleMinutes: { title: 'Idle shutdown (minutes)', description: 'Stop the engine process and free memory after this many idle minutes; 0 keeps it running (default, same as before). Only the engine is recycled — the 9882 API keeps listening and the next request starts it again. A manual Stop service is never restarted, including by the pet.' },
+    idleMinutes: { title: 'Idle shutdown (minutes)', description: 'Stop the engine process and free memory after this many idle minutes; decimals work (0.5 = 30 seconds) and the timer is accurate to the second. 0 keeps it running (default, same as before). Only the engine is recycled — the 9882 API keeps listening and the next request starts it again; an engine started by the pet is recycled the same way. A manual Stop service is never restarted, including by the pet.' },
     deviceAuto: 'Auto',
     deviceCuda: 'GPU (NVIDIA)',
     deviceCpu: 'CPU',
@@ -237,7 +243,7 @@ export function configGroups(language: Language): ConfigGroup[] {
         description: t.groupService.description,
         properties: {
           [`${K}.autoStart`]: { type: 'boolean', title: t.autoStart.title, description: t.autoStart.description, 'x-hot': false },
-          [`${K}.idleMinutes`]: { type: 'number', title: t.idleMinutes.title, description: t.idleMinutes.description, minimum: 0, maximum: 1440, multipleOf: 1, 'x-hot': true },
+          [`${K}.idleMinutes`]: { type: 'number', title: t.idleMinutes.title, description: t.idleMinutes.description, minimum: 0, maximum: 1440, 'x-hot': true },
           [`${K}.tier`]: { type: 'string', title: t.tier.title, description: t.tier.description, 'x-options': TIER_OPTIONS, 'x-hot': false },
           [`${K}.device`]: { type: 'string', title: t.device.title, description: t.device.description, 'x-options': DEVICE_OPTIONS, 'x-hot': false },
           [`${K}.runtimeDir`]: { type: 'string', title: t.runtimeDir.title, description: t.runtimeDir.description, 'x-path': { kind: 'directory' }, 'x-hot': false },

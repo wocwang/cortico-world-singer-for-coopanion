@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Logger, WorldHost } from 'cortico/core/types.ts';
 import { MODEL_BYTES } from '../src/catalog.ts';
-import { SINGER_DEFAULTS } from '../src/config.ts';
+import { idleDelayMs, SINGER_DEFAULTS } from '../src/config.ts';
 import type { SingerEngine } from '../src/engine.ts';
 import { SingerWorld } from '../src/world.ts';
 
@@ -172,6 +172,38 @@ describe('闲置回收行为', () => {
       vi.useRealTimers();
     }
   });
+
+  it('小数分钟按秒回收（0.02 = 1.2 秒）', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeEngine();
+      await makeWorld({ cfg: { autoStart: true, idleMinutes: 0.02 }, createEngine: () => fake.engine });
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(fake.stops()).toBe(0);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fake.stops()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('桌宠按需拉起的服务也会排闲置回收', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeEngine();
+      const { world } = await makeWorld({
+        cfg: { autoStart: false, idleMinutes: 0.02 }, createEngine: () => fake.engine,
+      });
+      expect(fake.ready()).toBe(false);
+      const ready = await world.ensureServiceForTool(1_000);
+      expect(ready.ok).toBe(true);
+      expect(fake.ready()).toBe(true);
+      await vi.advanceTimersByTimeAsync(1_200);
+      expect(fake.stops()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('闲置回收配置', () => {
@@ -179,11 +211,17 @@ describe('闲置回收配置', () => {
     expect(SINGER_DEFAULTS.idleMinutes).toBe(0);
   });
 
-  it('服务分组里能改，最小 0（0 表示不回收）', async () => {
+  it('服务分组里能改，最小 0（0 表示不回收），支持小数到秒', async () => {
     const { world } = await makeWorld();
     const group = world.webUi('zh').config?.find((g) => g.id.endsWith(':service'));
-    const prop = group?.schema.properties?.['worlds.singer.idleMinutes'] as { type?: string; minimum?: number } | undefined;
+    const prop = group?.schema.properties?.['worlds.singer.idleMinutes'] as {
+      type?: string; minimum?: number; multipleOf?: number;
+    } | undefined;
     expect(prop?.type).toBe('number');
     expect(prop?.minimum).toBe(0);
+    expect(prop?.multipleOf).toBeUndefined();
+    expect(idleDelayMs(0.5)).toBe(30_000);
+    expect(idleDelayMs(0.02)).toBe(1_200);
+    expect(idleDelayMs(0)).toBe(0);
   });
 });

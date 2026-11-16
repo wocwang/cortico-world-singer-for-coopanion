@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import type { Language } from 'cortico/core/language.ts';
 import type { Logger, ToolDef, ToolOutcome, World, WorldHost, WorldLamp, WorldWebUiDecl } from 'cortico/core/types.ts';
 import {
-  configGroups, DEFAULT_PORT, SINGER_ID, worldLabel,
+  configGroups, DEFAULT_PORT, idleDelayMs, SINGER_ID, worldLabel,
   type SingerConfigSection, type SingerTier,
 } from './config.ts';
 import { SingerEngine, SingerError, type EngineState } from './engine.ts';
@@ -399,12 +399,12 @@ export class SingerWorld implements World {
   /** 闲置回收：到点停掉引擎。服务关着、正在换声库、还有句子在排队时不排期。 */
   private armIdle(): void {
     this.cancelIdle();
-    const minutes = Math.max(0, Math.floor(Number(this.opts.cfg.idleMinutes) || 0));
-    if (!minutes || this.stopped || !this.serviceOn) return;
+    const delayMs = idleDelayMs(this.opts.cfg.idleMinutes);
+    if (!delayMs || this.stopped || !this.serviceOn) return;
     const engine = this.engine;
     if (!engine?.ready() || this.switching) return;
     if (this.singBusy > 0 || engine.queue() > 0) return;
-    this.idleTimer = setTimeout(() => { void this.sleepIdle(); }, minutes * 60_000);
+    this.idleTimer = setTimeout(() => { void this.sleepIdle(); }, delayMs);
     this.idleTimer.unref?.();
   }
 
