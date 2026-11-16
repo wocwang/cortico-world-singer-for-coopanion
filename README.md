@@ -47,6 +47,16 @@ Coopanion 的 `kind: world` 插件：**让大肥鱼临场发挥、随意唱歌**
 
 装依赖前会先停引擎——worker 在跑时 `pip` 覆盖不了 venv 里的 `.pyd/.dll`。
 
+下载来源默认「镜像优先、官方兜底」：绮萱包（401 MB）实测 ghfast 稳定返回 403，顺序是
+gh-proxy → ghproxy.net → 官方 → ghfast；声码器仍是 ghfast → gh-proxy → 官方。
+设了 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 时官方一律排最前
+（代理通常已经把 GitHub 打通，不必再多跳一次镜像）。来源在起步 10 秒后按 6 秒窗口采样、
+平均速度低于 100 KB/s 就会被放弃并换下一个，已下的部分带 `Range` 续传，不会卡在慢源上；
+最后一个来源不按速度放弃（再慢也比装不上强）。
+注意 Node 的 `fetch` 不会自动走系统代理：想让请求真正经过代理，需要用 `--use-env-proxy`
+启动 Coopanion（Node 24 的实验参数）；插件本身只按环境变量调整来源顺序。
+手工下载也可以：按下方文件名与字节数放进数据目录，校验大小一致就当作已下载，跳过网络。
+
 数据目录（`<Coopanion 数据目录>/singer/`）：
 
 ```

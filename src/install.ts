@@ -54,37 +54,78 @@ export function hasFile(dir: string, file: PinnedFile): boolean {
 /** 校验失败：数据本身不对，`.partial` 必须扔掉，换下一个来源重下。 */
 class VerifyError extends Error {}
 
+/** 来源太慢：保留 `.partial`，换下一个来源续传（慢不是错，但不能一直等）。 */
+class SlowSourceError extends Error {}
+
+/** 低速判定：先给一段起步时间，之后按窗口平均速度采样，低于阈值就切源。 */
+const envNumber = (name: string, fallback: number): number => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+};
+const MIN_BPS = (): number => envNumber('SINGER_MIN_BPS', 100 * 1024);
+const GRACE_MS = (): number => envNumber('SINGER_LOW_SPEED_GRACE_MS', 10_000);
+const WINDOW_MS = (): number => envNumber('SINGER_LOW_SPEED_WINDOW_MS', 6_000);
+
 /**
  * 把一个地址下到 `dest`；`offset > 0` 时带 `Range` 续传。
  * 服务器忽略 Range（回 200）就截断重下，保证不会把两段数据拼在一起。
+ * 起步后按窗口统计速度，低于阈值主动中断并抛 `SlowSourceError`，由调用方换下一个来源续传
+ * （最后一个来源传 `enforceSpeed = false`，不因慢而放弃）。
  */
-async function fetchTo(url: string, dest: string, offset: number, signal: AbortSignal): Promise<void> {
+async function fetchTo(url: string, dest: string, offset: number, signal: AbortSignal, enforceSpeed: boolean): Promise<void> {
   const headers = offset > 0 ? { Range: `bytes=${offset}-` } : undefined;
-  const res = await fetch(url, { signal, redirect: 'follow', headers });
+  const local = new AbortController();
+  const combined = AbortSignal.any([signal, local.signal]);
+  const res = await fetch(url, { signal: combined, redirect: 'follow', headers });
   if (res.status === 416 && offset > 0) return; // 已经下到头，交给调用方校验
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
   const append = offset > 0 && res.status === 206;
   if (!append && offset > 0) rmSync(dest, { force: true });
+  let received = offset;
   const counter = new Transform({
-    transform(chunk: Buffer, _enc, done) { done(null, chunk); },
+    transform(chunk: Buffer, _enc, done) { received += chunk.length; done(null, chunk); },
   });
+  const startedAt = Date.now();
+  let lastAt = startedAt;
+  let lastBytes = received;
+  const monitor = setInterval(() => {
+    const now = Date.now();
+    const elapsed = (now - lastAt) / 1000;
+    if (enforceSpeed && now - startedAt >= GRACE_MS()) {
+      const bps = (received - lastBytes) / Math.max(elapsed, 0.001);
+      if (bps < MIN_BPS()) {
+        local.abort(new SlowSourceError(`速度 ${(bps / 1024).toFixed(0)} KB/s，低于 ${(MIN_BPS() / 1024).toFixed(0)} KB/s`));
+        return;
+      }
+    }
+    lastAt = now;
+    lastBytes = received;
+  }, WINDOW_MS());
   mkdirSync(dirname(dest), { recursive: true });
-  await pipeline(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream), counter, createWriteStream(dest, { flags: append ? 'a' : 'w' }), { signal });
+  try {
+    await pipeline(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream), counter, createWriteStream(dest, { flags: append ? 'a' : 'w' }), { signal: combined });
+  } catch (err) {
+    if (local.signal.aborted) throw local.signal.reason ?? err;
+    throw err;
+  } finally {
+    clearInterval(monitor);
+  }
 }
 
-/** 按来源顺序下完一个文件；网络中断保留 `.partial` 供下次续传，校验失败则丢弃重来。 */
+/** 按来源顺序下完一个文件；网络中断/速度过慢保留 `.partial` 供下一个来源续传，校验失败则丢弃重来。 */
 async function downloadFile(dir: string, file: PinnedFile, signal: AbortSignal): Promise<void> {
   const dest = join(dir, file.path);
   const partial = `${dest}.partial`;
   if (hasFile(dir, file)) return;
   mkdirSync(dirname(dest), { recursive: true });
   const errors: string[] = [];
-  for (const url of file.sources) {
+  for (const [index, url] of file.sources.entries()) {
     if (signal.aborted) throw new Error('已取消');
     let offset = sizeOf(partial);
     if (offset > file.bytes) { rmSync(partial, { force: true }); offset = 0; }
     try {
-      await fetchTo(url, partial, offset, signal);
+      // 最后一个来源不按速度放弃：再慢也比彻底装不上强。
+      await fetchTo(url, partial, offset, signal, index < file.sources.length - 1);
       const size = sizeOf(partial);
       if (size !== file.bytes) throw new VerifyError(`大小 ${size}，应为 ${file.bytes}`);
       if (await sha256File(partial) !== file.sha256) throw new VerifyError('SHA-256 不符');

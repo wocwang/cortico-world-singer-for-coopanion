@@ -55,6 +55,25 @@ async function serve(files: Record<string, Buffer | '404'>, opts: { ignoreRange?
   return { base: `http://127.0.0.1:${port}`, hits };
 }
 
+/** 慢速服务：按固定间隔吐小块，用来验证「速度过低主动换源」。 */
+async function serveSlow(data: Buffer, chunk: number, delayMs: number): Promise<string> {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-length': data.length });
+    let at = 0;
+    const timer = setInterval(() => {
+      if (at >= data.length) { clearInterval(timer); res.end(); return; }
+      res.write(data.subarray(at, at + chunk));
+      at += chunk;
+    }, delayMs);
+    req.on('close', () => clearInterval(timer));
+  });
+  servers.push(() => new Promise<void>((done) => { server.close(() => done()); server.closeAllConnections(); }));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  const port = addr && typeof addr === 'object' ? addr.port : 0;
+  return `http://127.0.0.1:${port}/slow.bin`;
+}
+
 const pinned = (sources: string[], data: Buffer, path = 'blob.bin'): PinnedFile => ({
   path, bytes: data.length, sha256: sha(data), sources,
 });
@@ -141,5 +160,26 @@ describe('文件下载安装', () => {
     expect(job.status().phase).toBe('error');
     expect(job.status().detail).toContain('download.bin 下载失败'.replace('download.bin', 'blob.bin'));
     expect(statSync(join(dir, 'blob.bin.partial')).size).toBe(4);
+  });
+
+  it('来源速度长期过低时主动换下一个，并带 Range 续传', async () => {
+    const data = Buffer.alloc(64 * 1024, 7);
+    const slow = await serveSlow(data, 256, 100); // ≈2.5 KB/s
+    const { base, hits } = await serve({ '/blob.bin': data });
+    process.env.SINGER_MIN_BPS = '20000';
+    process.env.SINGER_LOW_SPEED_GRACE_MS = '300';
+    process.env.SINGER_LOW_SPEED_WINDOW_MS = '300';
+    try {
+      const dir = tempDir();
+      const job = new FileSetJob(dir, [pinned([slow, `${base}/blob.bin`], data)]);
+      await job.install();
+      expect(job.status().phase).toBe('ready');
+      expect(readFileSync(join(dir, 'blob.bin')).equals(data)).toBe(true);
+      expect(hits[0]!.range).toMatch(/^bytes=\d+-$/);
+    } finally {
+      delete process.env.SINGER_MIN_BPS;
+      delete process.env.SINGER_LOW_SPEED_GRACE_MS;
+      delete process.env.SINGER_LOW_SPEED_WINDOW_MS;
+    }
   });
 });
