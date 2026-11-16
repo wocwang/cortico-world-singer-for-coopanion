@@ -59,6 +59,8 @@ export interface SingerConfigSection {
   keyShift: number;
   /** 默认调式。 */
   scale: SingerScale;
+  /** 唱歌时用歌词气泡带动桌宠嘴型；关掉后不再为嘴型额外调 pet_say。 */
+  mouthAnimation: boolean;
   /** 干声再走一遍 RVC，换成小肥鱼/星落落大肥鱼的音色；默认关。 */
   rvcEnabled: boolean;
   /** RVC 插件接口地址；默认 127.0.0.1:9881（RVC 插件的默认端口）。 */
@@ -105,6 +107,7 @@ export const SINGER_DEFAULTS: SingerConfigSection = {
   bpm: 96,
   keyShift: 0,
   scale: 'major',
+  mouthAnimation: true,
   rvcEnabled: false,
   rvcEndpoint: DEFAULT_RVC_ENDPOINT,
   rvcVoice: '',
@@ -146,6 +149,7 @@ const TEXT = {
     bpm: { title: '默认速度（BPM）', description: '60..200；每字时值按拍折算。' },
     keyShift: { title: '默认移调（半音）', description: '−12..12，正数更高。绮萱是女声，一般 0 到 +4。' },
     scale: { title: '默认调式', description: '大调明亮，小调忧郁；旋律按起承转合在所选调式里生成。' },
+    mouthAnimation: { title: '唱歌时让嘴型动起来', description: '开启后，每句唱完用 pet_say 显示同一句歌词，气泡会带动桌宠嘴型；这一句结束气泡自然消失、嘴闭上。关闭后不再调 pet_say 带动嘴型，歌词只放在普通回复里。桌面宠物的嘴只跟气泡走，这是插件侧能做到的动画，不是逐字音频口型。' },
     scaleMajor: '大调',
     scaleMinor: '小调',
     rvcEnabled: { title: '启用 RVC 后处理', description: '开着时干声会 POST 给 RVC 插件（默认 127.0.0.1:9881）再返回。RVC 插件没装或没就绪时，本次退回绮萱原声，不报错。' },
@@ -181,6 +185,7 @@ const TEXT = {
     bpm: { title: 'Default tempo (BPM)', description: '60..200; note lengths are derived from the beat.' },
     keyShift: { title: 'Default transpose (semitones)', description: '−12..12, positive is higher. Qixuan is a female voice, usually 0 to +4.' },
     scale: { title: 'Default scale', description: 'Major is bright, minor is moody; the melody follows a four-phrase arc in that scale.' },
+    mouthAnimation: { title: 'Move the mouth while singing', description: 'On shows each sung line in a pet_say bubble, so the pet mouth moves with the line and closes when the bubble ends. Off stops the mouth-driven pet_say call and leaves the lyric in an ordinary reply. The desktop pet mouth follows bubbles only, so this is plugin-side motion, not per-word audio lip sync.' },
     scaleMajor: 'Major',
     scaleMinor: 'Minor',
     rvcEnabled: { title: 'Enable RVC post-processing', description: 'When on, the dry vocal is POSTed to the RVC plugin (127.0.0.1:9881 by default). If RVC is missing or not ready, this run falls back to the raw Qixuan voice instead of failing.' },
@@ -215,6 +220,7 @@ export function configGroups(language: Language): ConfigGroup[] {
           [`${K}.bpm`]: { type: 'number', title: t.bpm.title, description: t.bpm.description, minimum: BPM_MIN, maximum: BPM_MAX, multipleOf: 1 },
           [`${K}.keyShift`]: { type: 'number', title: t.keyShift.title, description: t.keyShift.description, minimum: KEY_SHIFT_MIN, maximum: KEY_SHIFT_MAX, multipleOf: 1 },
           [`${K}.scale`]: { type: 'string', title: t.scale.title, description: t.scale.description, 'x-options': SCALE_OPTIONS },
+          [`${K}.mouthAnimation`]: { type: 'boolean', title: t.mouthAnimation.title, description: t.mouthAnimation.description },
         },
       },
     },

@@ -117,7 +117,7 @@ describe('World 面板数据面', () => {
     const doc = world.webUi('zh').promptDocs?.[0];
     expect(doc?.role).toBe('envPrompt');
     expect(doc?.path.endsWith('env.md')).toBe(true);
-    expect(doc?.vars?.map((v) => v.name)).toEqual(['singer.state']);
+    expect(doc?.vars?.map((v) => v.name)).toEqual(['singer.state', 'singer.mouth']);
     // 这个 World 的 python 路径不存在，状态里应带上失败原因。
     expect(world.envPromptVars()['singer.state']).toContain('Python 解释器不存在');
   });
@@ -223,5 +223,22 @@ describe('闲置回收配置', () => {
     expect(idleDelayMs(0.5)).toBe(30_000);
     expect(idleDelayMs(0.02)).toBe(1_200);
     expect(idleDelayMs(0)).toBe(0);
+  });
+});
+
+describe('唱歌嘴型开关', () => {
+  it('默认开启，可在唱歌参数里关掉', async () => {
+    expect(SINGER_DEFAULTS.mouthAnimation).toBe(true);
+    const { world } = await makeWorld({ cfg: { mouthAnimation: false } });
+    const group = world.webUi('zh').config?.find((g) => g.id === 'world:singer');
+    expect(group?.schema.properties?.['worlds.singer.mouthAnimation']).toMatchObject({ type: 'boolean' });
+    expect(world.envPromptVars()['singer.mouth']).toContain('已关闭');
+  });
+
+  it('环境变量按开关给出开启 / 关闭提示', async () => {
+    const off = await makeWorld({ cfg: { mouthAnimation: false } });
+    expect(off.world.envPromptVars()['singer.mouth']).toContain('不要调用 pet_say');
+    const on = await makeWorld();
+    expect(on.world.envPromptVars()['singer.mouth']).toContain('气泡会带动嘴型');
   });
 });

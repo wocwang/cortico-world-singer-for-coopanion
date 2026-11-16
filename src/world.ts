@@ -208,7 +208,10 @@ export class SingerWorld implements World {
         : st?.phase === 'error'
           ? `出错：${st.detail || this.launchDetail || '未知原因'}`
           : '未启动（在「服务」页点「启动服务」）';
-    return { 'singer.state': state };
+    const mouth = this.opts.cfg.mouthAnimation === false
+      ? '已关闭：不要调用 pet_say 带动嘴型；歌词放在普通回复里即可。'
+      : '已开启：唱完后用 pet_say 显示同一句歌词，气泡会带动嘴型；这一句结束让气泡自然消失，嘴就会闭上。';
+    return { 'singer.state': state, 'singer.mouth': mouth };
   }
 
   tools(): ToolDef[] {
@@ -239,7 +242,10 @@ export class SingerWorld implements World {
         description: 'QQ 点歌用 qq_send + voice=true；桌宠 / 对话页先 singer_sing，等回执后 pet_say 同一句歌词；速度 / 调式 / 移调可以直接在对话里改。',
         path: ENV_PROMPT_PATH,
         role: 'envPrompt',
-        vars: [{ name: 'singer.state', description: '唱歌引擎此刻的状态（就绪 / 启动中 / 出错 / 未启动）。' }],
+        vars: [
+          { name: 'singer.state', description: '唱歌引擎此刻的状态（就绪 / 启动中 / 出错 / 未启动）。' },
+          { name: 'singer.mouth', description: '唱歌时是否用 pet_say 带动嘴型（读配置里的「唱歌时让嘴型动起来」）。' },
+        ],
       }],
       // 配置组交给框架自带的配置视图，不各占一个面板。
       config: configGroups(language),
