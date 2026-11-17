@@ -51,6 +51,8 @@ export interface SingOutcome {
   ms: number;
   /** 这次结果里干声是否又过了 RVC。 */
   rvc: boolean;
+  /** 开了 RVC 但没换成时的原因（没装 / 没运行 / 超时 / 转换失败）；成功时不填。 */
+  rvcNote?: string;
   savedPath?: string;
 }
 
@@ -220,7 +222,8 @@ export function startSingServer(opts: {
         'x-singer-rvc': out.rvc ? '1' : '0',
       };
       if (out.savedPath) headers['x-singer-saved'] = encodeURIComponent(out.savedPath);
-      deps.log.info('唱歌完', { bpm: job.bpm, ms: out.ms, seconds: out.seconds, bytes: out.audio.length, rvc: out.rvc });
+      if (out.rvcNote) headers['x-singer-rvc-note'] = encodeURIComponent(out.rvcNote);
+      deps.log.info('唱歌完', { bpm: job.bpm, ms: out.ms, seconds: out.seconds, bytes: out.audio.length, rvc: out.rvc, rvcNote: out.rvcNote });
       if (job.base64) {
         json(res, 200, {
           ok: true,
@@ -230,6 +233,7 @@ export function startSingServer(opts: {
           notes: out.notes,
           sungChars: out.sungChars,
           rvc: out.rvc,
+          rvcNote: out.rvcNote ?? null,
           savedPath: out.savedPath ?? null,
           audioBase64: out.audio.toString('base64'),
         });

@@ -103,6 +103,8 @@ function makeWorld(opts: { failPlayer?: boolean; cfg?: Partial<SingerConfigSecti
   const voicebankDir = join(dataDir, 'voicebank');
   mkdirSync(join(voicebankDir, 'dsdur'), { recursive: true });
   writeFileSync(join(voicebankDir, 'dsconfig.yaml'), 'singer_type: diffsinger\n');
+  // 模拟部署布局：runtimes 在 <root>/home/runtimes，扩展在 <root>/extensions/node_modules（没有 RVC 包）。
+  mkdirSync(join(dataDir, 'extensions', 'node_modules'), { recursive: true });
   const cfg: SingerConfigSection = {
     ...SINGER_DEFAULTS, enabled: true, httpApi: false, voicebankDir, ...opts.cfg,
   };
@@ -111,7 +113,7 @@ function makeWorld(opts: { failPlayer?: boolean; cfg?: Partial<SingerConfigSecti
   const world = new SingerWorld({
     cfg,
     dataDir,
-    runtimesRoot: () => join(dataDir, 'runtimes'),
+    runtimesRoot: () => join(dataDir, 'home', 'runtimes'),
     createEngine: (_init: EngineInit) => fake as unknown as SingerEngine,
     createPlayer: () => player,
   });
@@ -193,13 +195,13 @@ describe('singer_sing 工具', () => {
     expect(st.defaults).toEqual({ bpm: 72, keyShift: 3, scale: 'minor' });
   });
 
-  it('RVC 不可用：直接播原声，这一句不失败', async () => {
+  it('RVC 不可用：直接播原声，回执写明没装', async () => {
     const { player, world } = makeWorld({ cfg: { rvcEnabled: true, rvcEndpoint: 'http://127.0.0.1:1' } });
     await world.start({ log } as unknown as WorldHost);
     await nextTick();
     const out = await call(world, { lyrics: '晚风' });
     expect(out.failed).toBeUndefined();
-    expect(out.text).toBe('晚风');
+    expect(out.text).toBe('晚风\n（RVC 未安装，本次用绮萱原声）');
     expect(player.writes.length).toBe(1);
   });
 

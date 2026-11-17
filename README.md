@@ -144,6 +144,9 @@ curl -sS -X POST http://127.0.0.1:9882/sing \
 
 - **说话**走 gpt-sovits；**唱歌**走本插件；
 - 想让歌声也换成你训练的音色，把本插件的「RVC 后处理」打开（`indexRate` / `protect` 可调）；
+  外放时会先等 RVC 就绪（最多 25 秒；接口/面板 60 秒）再送干声，不会一上来吃 409。
+  RVC 没装、插件没启用、启动超时或转换失败，本次都用绮萱原声唱完，并在回执/气泡里写明是哪一种；
+  三个插件的启动顺序不用再手动凑；
 - QQ 里点歌是「gpt-sovits 的语音接口收到 `【唱】` → 转给本插件 → 唱好回传」，所以三个插件要同时在运行。
 - 桌宠 / 对话页的唱歌**不再依赖 gpt-sovits**：本插件自己合成、自己写声卡（`singer_sing`）；只有 QQ 点歌仍然要三个插件在运行；
 
@@ -227,7 +230,7 @@ worker 在启动时给每个阶段包了一层，按后缀把 `variance_Soft` �
 | `voicebank` | 空 | 从总目录里选的声库文件夹名；空则用 `voicebankDir` |
 | `voiceColor` | 空 | 音色（`Normal` / `Soft`…）；空用第一个 |
 | `bpm` / `keyShift` / `scale` | 96 / 0 / `major` | 面板与接口的默认值 |
-| `rvcEnabled` | false | 干声再过一遍 RVC |
+| `rvcEnabled` | false | 干声再过一遍 RVC；先等 RVC 就绪（外放 25 秒、接口 60 秒），失败会说明原因并回原声 |
 | `rvcEndpoint` | `http://127.0.0.1:9881` | RVC 插件接口地址 |
 | `rvcVoice` | 空 | `.pth` 名（不含扩展名）；空用 RVC 插件的默认音色 |
 | `httpApi` / `httpPort` / `httpToken` | true / 9882 / 空 | 本机接口开关、端口、令牌 |
