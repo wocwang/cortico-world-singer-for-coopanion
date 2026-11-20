@@ -9,6 +9,8 @@ export interface WavHeader {
   bitsPerSample: number;
   /** `data` chunk 之后第一个字节在 buf 里的偏移。 */
   dataStart: number;
+  /** `data` chunk 声明的字节数（已按实际文件长度截断）。 */
+  dataBytes: number;
 }
 
 /** 读 wav 头；不是 RIFF/WAVE 或找不到 fmt/data 时回 `null`。 */
@@ -26,7 +28,15 @@ export function parseWavHeader(buf: Buffer): WavHeader | null {
       sampleRate = buf.readUInt32LE(at + 12);
       bitsPerSample = buf.readUInt16LE(at + 22);
     }
-    if (id === 'data') return sampleRate > 0 ? { sampleRate, channels, bitsPerSample, dataStart: at + 8 } : null;
+    if (id === 'data') {
+      if (sampleRate <= 0) return null;
+      // 有的写作者把 data 长度写成 0 或 0xFFFFFFFF（流式），按实际文件长度收住。
+      const available = Math.max(0, buf.length - (at + 8));
+      return {
+        sampleRate, channels, bitsPerSample, dataStart: at + 8,
+        dataBytes: Math.min(size, available),
+      };
+    }
     at += 8 + size + (size & 1);
   }
   return null;

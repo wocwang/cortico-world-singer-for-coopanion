@@ -35,6 +35,10 @@ export interface SingJob {
   gender: number;
   maxSeconds: number;
   speaker: string;
+  /** 指定旋律（compose 的 lead-sheet 文本）；空则由程序按调式生成。 */
+  melody: string;
+  /** 旋律的拍号，如 4/4、3/4；`melody` 为空时忽略。 */
+  meter: string;
   /** 另存到插件数据目录，响应带 `x-singer-saved`。 */
   save: boolean;
   /** 回 JSON + base64 而不是音频字节。 */
@@ -137,6 +141,8 @@ export function readSingJob(body: unknown): SingJob {
     gender: readNumber(raw.gender, 'gender', -1, 1, 0, false),
     maxSeconds: readNumber(raw.maxSeconds, 'maxSeconds', MAX_SECONDS_MIN, MAX_SECONDS_MAX, 60),
     speaker: readString(raw.speaker, 'speaker', 64),
+    melody: readString(raw.melody, 'melody', 4_000),
+    meter: readString(raw.meter, 'meter', 16, '4/4') || '4/4',
     save: readBool(raw.save, 'save', false),
     base64: readBool(raw.base64, 'base64', false),
   };

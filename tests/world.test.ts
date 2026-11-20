@@ -117,7 +117,7 @@ describe('World 面板数据面', () => {
     const doc = world.webUi('zh').promptDocs?.[0];
     expect(doc?.role).toBe('envPrompt');
     expect(doc?.path.endsWith('env.md')).toBe(true);
-    expect(doc?.vars?.map((v) => v.name)).toEqual(['singer.state', 'singer.mouth']);
+    expect(doc?.vars?.map((v) => v.name)).toEqual(['singer.state', 'singer.mouth', 'singer.compose']);
     // 这个 World 的 python 路径不存在，状态里应带上失败原因。
     expect(world.envPromptVars()['singer.state']).toContain('Python 解释器不存在');
   });
@@ -223,6 +223,16 @@ describe('闲置回收配置', () => {
     expect(idleDelayMs(0.5)).toBe(30_000);
     expect(idleDelayMs(0.02)).toBe(1_200);
     expect(idleDelayMs(0)).toBe(0);
+  });
+});
+
+describe('作曲联动开关', () => {
+  it('默认关，开关在「唱歌参数」组里，提示词说未开启', async () => {
+    expect(SINGER_DEFAULTS.composeLink).toBe(false);
+    const { world } = await makeWorld();
+    const group = world.webUi('zh').config?.find((g) => g.id === 'world:singer');
+    expect(group?.schema.properties?.['worlds.singer.composeLink']).toMatchObject({ type: 'boolean' });
+    expect(world.envPromptVars()['singer.compose']).toContain('未开启');
   });
 });
 

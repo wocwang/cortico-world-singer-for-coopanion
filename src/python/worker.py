@@ -1107,6 +1107,59 @@ class Singer:
 
         return read
 
+    def build_notes_from_melody(self, melody, lyrics, bpm, key_shift, max_seconds):
+        """按指定旋律铺音符：每个有音高的槽吃掉一个歌词单元（字 / 假名 / 音节），
+        休止不吃字，延音已经在 Node 侧并进前一个音。返回 (notes, text, lang)。"""
+        beat = 60.0 / max(40, bpm)
+
+        units = []
+        lang_counts = {}
+        for piece in PHRASE_SPLIT.split(lyrics):
+            if not piece:
+                continue
+            piece_units, lang = self.phrase_units(piece)
+            for unit in piece_units:
+                units.append(unit)
+                lang_counts[lang] = lang_counts.get(lang, 0) + 1
+
+        pitched = [note for note in melody if note.get("midi") is not None]
+        if len(units) != len(pitched):
+            raise ValueError(
+                f"歌词有 {len(units)} 个可唱单元（字 / 假名 / 音节），旋律有 {len(pitched)} 个音；"
+                "用「-」把长音延下去、用「.」留休止，让两者对齐"
+            )
+
+        notes = []
+        sung_text = []
+        total = 0.0
+        index = 0
+        for note in melody:
+            dur = float(note.get("beats") or 0) * beat
+            if dur <= 0:
+                continue
+            if total + dur > max_seconds:
+                break
+            midi = note.get("midi")
+            if midi is None:
+                notes.append({"phones": ["SP"], "midi": None, "dur": dur, "rest": True})
+                total += dur
+                continue
+            grapheme, phonemes = units[index]
+            index += 1
+            notes.append({
+                "phones": phonemes,
+                "midi": int(midi) + int(key_shift),
+                "dur": dur,
+                "rest": False,
+            })
+            sung_text.append(grapheme)
+            total += dur
+
+        while notes and notes[-1]["rest"]:
+            notes.pop()
+        lang = max(lang_counts, key=lang_counts.get) if lang_counts else "zh"
+        return notes, "".join(sung_text), lang
+
     def build_notes(self, lyrics, bpm, key_shift, scale, seed, max_seconds):
         """按句生成旋律：先挑一套结构规则，再按这套规则铺动机、定落音、切气口。
         每字/每音节一个音符。返回 (notes, text, lang)。"""
@@ -1283,7 +1336,13 @@ class Singer:
         max_seconds = float(job.get("maxSeconds") or 60)
         out = Path(job["out"])
 
-        notes, text, lang = self.build_notes(lyrics, bpm, key_shift, scale, seed, max_seconds)
+        melody = job.get("notes")
+        if isinstance(melody, list) and melody:
+            notes, text, lang = self.build_notes_from_melody(
+                melody, lyrics, bpm, key_shift, max_seconds
+            )
+        else:
+            notes, text, lang = self.build_notes(lyrics, bpm, key_shift, scale, seed, max_seconds)
         if not notes:
             raise ValueError(
                 "没有可唱的字：中文要汉字且声库音素表里有读音，"

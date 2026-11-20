@@ -92,6 +92,29 @@ out/         勾选「保存」时的成品
 卸载会先停引擎（worker 占着 venv 里的 `.pyd/.dll` 与声库目录）；有安装任务在进行时不允许卸载。
 删除前会校验目录：声库必须含 `dsconfig.yaml`，派生 venv 必须含 `pyvenv.cfg`，避免误删手填的路径。
 
+## 和作曲世界一起用
+
+[compose](https://github.com/Phantivia/cortico-world-compose) 写旋律用的是一套 lead-sheet 文本
+（`C4 D4 E4 - | G4 - - .`），本插件直接吃同一套写法：把 `compose_phrase` / `compose_render` 里那条
+`line` 原样放进 `singer_sing` 的 `melody`，`meter` 跟那一段一致，就能把这条旋律唱出来。
+
+推荐流程（提示词里也是这么教的）：先用 `compose_phrase` 写一段、听一遍，让 Coo 把后半段补完；
+满意后把同一条 line 交给 `singer_sing` 唱。歌词每个字对一个音，`-` 把长音延下去、`.` 留休止，
+字数与音数不一致会直接报错并说明差多少。
+
+设置「唱歌参数 → 与作曲插件联动」打开后（且部署里检测到 compose），桌宠 / 对话页**不再自己生成旋律**：
+模型要先调 `compose_phrase` 写一段，把 line 放进 `singer_sing` 的 `melody` 再唱；不带 `melody` 的调用
+会被拒绝并提示先作曲。没检测到作曲插件时仍按原来的方式自动生成；面板试听与 HTTP 接口不受这个开关影响。
+
+想用自己的曲子当伴奏：让 Coo 用 `compose_render` 渲染一段**只有和弦与律动**（不写 `melody`）的段落，
+把回执里的 `.wav` 路径填进 `singer_sing` 的 `backing`——歌声和伴奏会混成一条、从同一个采样点同时开始。
+伴奏按人声一半左右的音量叠在下面，句尾多留 1.5 秒并淡出；伴奏开头的数字静音（compose 会在第 1 小节前
+留约 0.3 秒）会自动裁掉，让第 1 拍和歌声同时开始；立体声会降混、采样率不同会重采样，文件读不了就清唱
+并在回执里说明。已有主旋律的曲子也能当伴奏，但主旋律会和歌声重复。
+
+`hear: true` 会把这一句的录音（含伴奏）作为音频附件放进回执；上游模型支持音频（如 Gemini）时 Coo 能真的听到，
+不支持时只看到一行说明。
+
 ## HTTP 接口
 
 默认 `http://127.0.0.1:9882`。配了令牌就要求 `Authorization: Bearer <token>` 或 `?token=<token>`。
@@ -117,7 +140,9 @@ curl -sS -X POST http://127.0.0.1:9882/sing \
 | 参数 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `lyrics` | string，必填 | — | 要唱的歌词，最长 2000 字；中文写汉字、日语写假名（要配合日语声库）、英语写单词（要配合带英语词典的声库），标点断句，其余字符不唱 |
-| `bpm` | int | 96 | 60..200；每字半拍、句末一字一拍，不插气口 |
+| `melody` | string | 空 | 指定旋律，直接用 [compose](https://github.com/Phantivia/cortico-world-compose) 的 lead-sheet 写法：`C4 D4 E4 - | G4 - - .`，`-` 延音、`.` 休止、`|` 分小节；每个音对一个歌词单元，字数要对得上 |
+| `meter` | string | `4/4` | `melody` 的拍号（4/4、3/4、6/8），与 compose 那一段一致；不带 `melody` 时忽略 |
+| `bpm` | int | 96 | 60..200；不带 `melody` 时每字半拍、句末一字一拍；带 `melody` 时决定一拍多长 |
 | `keyShift` | int | 0 | −12..12，半音 |
 | `scale` | string | `major` | `major` / `minor` |
 | `seed` | int | 0 | 0 表示按歌词固定取值：同一歌词同一条旋律；换歌词就换旋律 |
@@ -235,6 +260,7 @@ worker 在启动时给每个阶段包了一层，按后缀把 `variance_Soft` �
 | `voicebank` | 空 | 从总目录里选的声库文件夹名；空则用 `voicebankDir` |
 | `voiceColor` | 空 | 音色（`Normal` / `Soft`…）；空用第一个 |
 | `bpm` / `keyShift` / `scale` | 96 / 0 / `major` | 面板与接口的默认值 |
+| `composeLink` | false | 与作曲插件联动：开着且检测到 `cortico-world-compose` 时，桌宠 / 对话页先 `compose_phrase` 写旋律再交给 `singer_sing`，不再自己编旋律；面板与 HTTP 不受影响 |
 | `rvcEnabled` | false | 干声再过一遍 RVC；直接交给 `/convert` 让 RVC 懒启动引擎（外放最多等 50 秒），失败会说明原因并回原声 |
 | `rvcEndpoint` | `http://127.0.0.1:9881` | RVC 插件接口地址 |
 | `rvcVoice` | 空 | `.pth` 名（不含扩展名）；空用 RVC 插件的默认音色 |
@@ -242,7 +268,7 @@ worker 在启动时给每个阶段包了一层，按后缀把 `variance_Soft` �
 
 生效时机：`voicebank` / `voiceColor` 改了下一句就生效（换声库失败会自动退回上一个）；
 `tier` / `device` / `runtimeDir` / `pythonPath` / `voicebankDir` / `voicebanksDir` / `httpApi` / `httpPort` / `httpToken`
-改完在面板点「重启引擎」生效（设置页也会标「重启生效」）。`bpm` / `keyShift` / `scale` 与 RVC 参数每句现读。
+改完在面板点「重启引擎」生效（设置页也会标「重启生效」）。`bpm` / `keyShift` / `scale`、`composeLink` 与 RVC 参数每句现读。
 
 ## 开发
 

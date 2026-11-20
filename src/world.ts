@@ -21,6 +21,8 @@ import {
 } from './config.ts';
 import { SingerEngine, SingerError, type EngineState } from './engine.ts';
 import { SingerInstaller } from './install.ts';
+import { parseMelody } from './melody.ts';
+import { BACKING_MAX_BYTES, BackingError, mixVocalWithBacking } from './mix.ts';
 import { rvcPost, wakeRvc } from './rvc.ts';
 import { Player, type WavPlayer } from './player.ts';
 import { SINGER_TOOL_DECLS } from './tools.ts';
@@ -38,7 +40,7 @@ import { VOCODER_PAGE, VOICEBANK_PAGE, VOICEBANK_VERSION } from './catalog.ts';
 const WORKER_SCRIPT = fileURLToPath(new URL('./python/worker.py', import.meta.url));
 /** 告诉模型「在哪唱歌、怎么点歌」的环境提示词模板。 */
 const ENV_PROMPT_PATH = fileURLToPath(new URL('../prompts/env.md', import.meta.url));
-const VERSION = '0.1.30';
+const VERSION = '0.2.3';
 /** `singer_sing` 等这一句唱进声卡的上限：整句批式合成 0.5–11 秒，再加 RVC 最多 20 秒，留足余量。 */
 const SING_ALOUD_MAX_MS = 90_000;
 /** 换声库时最多等旧引擎把排队的句子唱完（超时也照样切，别把用户卡死）。 */
@@ -104,6 +106,20 @@ function dirBytes(dir: string): number {
 /** 回执里带的技术细节别太长，气泡要能读。 */
 function short(text: string, max = 40): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/**
+ * 「作曲」插件包在不在：`<部署数据目录>/extensions/node_modules/cortico-world-compose`。
+ * 与 RVC 一样由 `runtimesRoot`（`<数据目录>/home/runtimes`）往上两级推。
+ * 这里只看装没装；插件是否启用由宿主决定（没启用时模型调 compose_phrase 会看到宿主的原因）。
+ */
+function composePackageInstalled(runtimesRoot: string): boolean {
+  try {
+    const modules = join(dirname(dirname(runtimesRoot)), 'extensions', 'node_modules');
+    return existsSync(join(modules, 'cortico-world-compose', 'package.json'));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -240,7 +256,18 @@ export class SingerWorld implements World {
     const mouth = this.opts.cfg.mouthAnimation === false
       ? '已关闭：不要调用 pet_say 带动嘴型；歌词放在普通回复里即可。'
       : '已开启：唱完后用 pet_say 显示同一句歌词，气泡会带动嘴型；这一句结束让气泡自然消失，嘴就会闭上。';
-    return { 'singer.state': state, 'singer.mouth': mouth };
+    const compose = !this.opts.cfg.composeLink
+      ? '未开启（设置「唱歌参数 → 与作曲插件联动」）：旋律仍由 DiffSinger 自己生成；主人点名要某条旋律时仍可用 melody。'
+      : this.composeLinked()
+        ? '已开启且检测到作曲插件：唱之前先调 compose_phrase 写（或补完）旋律，把它返回的 line 原样放进 singer_sing 的 melody，meter 与 bpm 对齐那一段；不带 melody 的 singer_sing 会被拒绝。compose_phrase 报错（插件没启用等）时如实告诉主人并让他启用，不要不带 melody 硬唱。'
+        : '设置里开着，但没在这个部署里检测到作曲插件：这一句仍由 DiffSinger 自己生成旋律；可以提醒主人安装或启用作曲插件。';
+    return { 'singer.state': state, 'singer.mouth': mouth, 'singer.compose': compose };
+  }
+
+  /** 作曲联动是否真的生效：开关开着，并且部署里装了 compose。 */
+  private composeLinked(): boolean {
+    return this.opts.cfg.composeLink === true
+      && composePackageInstalled(this.runtimesRoot || this.opts.runtimesRoot());
   }
 
   tools(): ToolDef[] {
@@ -274,6 +301,7 @@ export class SingerWorld implements World {
         vars: [
           { name: 'singer.state', description: '唱歌引擎此刻的状态（就绪 / 启动中 / 出错 / 未启动）。' },
           { name: 'singer.mouth', description: '唱歌时是否用 pet_say 带动嘴型（读配置里的「唱歌时让嘴型动起来」）。' },
+          { name: 'singer.compose', description: '与作曲插件联动此刻的写法：关着 / 已开启且检测到 compose / 开启但没检测到。' },
         ],
       }],
       // 配置组交给框架自带的配置视图，不各占一个面板。
@@ -609,9 +637,11 @@ export class SingerWorld implements World {
       method: 'POST',
       path: '/sing',
       contentType: 'application/json',
-      note: '歌词进，wav 出；中文写汉字、日语写假名（需日语声库）、英语写单词（需带英语词典的声库），标点断句，其余字符不唱。旋律按起承转合在所选调式里生成（每句拱形，句末落主音、三音或五度）。配置里换了声库，下一句自动换引擎，不用重启。',
+      note: '歌词进，wav 出；中文写汉字、日语写假名（需日语声库）、英语写单词（需带英语词典的声库），标点断句，其余字符不唱。不带 melody 时旋律按起承转合在所选调式里生成；带 melody 时按那条 lead-sheet 唱（每字一个音，「-」延音、「.」休止）。配置里换了声库，下一句自动换引擎，不用重启。',
       params: {
         lyrics: { type: 'string', required: true, maxLength: LYRICS_MAX, description: '要唱的歌词，例如「晚风吹过旧时光」；日语写假名，英语用空格分词' },
+        melody: { type: 'string', maxLength: 4000, description: '指定旋律，写法与 compose 的 lead-sheet 相同：C4 D4 E4 - | G4 - - .；「-」延音、「.」休止、「|」分小节；每个音对一个字' },
+        meter: { type: 'string', default: '4/4', description: 'melody 的拍号（4/4、3/4、6/8），与 compose 的小节一致；melody 为空时忽略' },
         bpm: { type: 'integer', default: cfg.bpm, min: 60, max: 200, description: '速度；每字半拍、句末一字一拍' },
         keyShift: { type: 'integer', default: cfg.keyShift, min: -12, max: 12, description: '移调（半音），正数更高' },
         scale: { type: 'string', default: cfg.scale, enum: ['major', 'minor'], description: '旋律调式' },
@@ -665,6 +695,15 @@ export class SingerWorld implements World {
   }
 
   private async singAloudOnce(args: Record<string, unknown>): Promise<ToolOutcome> {
+    // 作曲联动开着且装了 compose：不再由 DiffSinger 现编旋律。
+    // 模型要先用 compose_phrase 写一段，把 line 放进 melody 再调这里；这样「开口就唱」不会绕开作曲插件。
+    const melody = typeof args.melody === 'string' ? args.melody.trim() : '';
+    if (!melody && this.composeLinked()) {
+      return {
+        text: 'No melody: the compose link is on, so call compose_phrase first (or reuse the line from this conversation), then call singer_sing again with that line in melody and meter / bpm matching it. singer_sing does not invent the melody while the link is on.',
+        failed: true,
+      };
+    }
     // 引擎没起（随机启动关着 / 闲置回收 / 意外停着）就先拉起再唱；手动停服务不覆盖。
     const ready = await this.ensureServiceForTool();
     if (!ready.ok) {
@@ -698,15 +737,31 @@ export class SingerWorld implements World {
     } catch (err) {
       return { text: `Nothing sung: ${err instanceof Error ? err.message : String(err)}.`, failed: true };
     }
+    // 伴奏：通常是 compose_render 渲染好的 wav（想干净就不写 melody）。
+    // 混成一条再播，歌声与伴奏从同一个采样点同时开始；读不了就清唱并在回执里写明。
+    let audio = out.audio;
+    let backingNote = '';
+    const backingPath = typeof args.backing === 'string' ? args.backing.trim() : '';
+    if (backingPath) {
+      try {
+        const bytes = readFileSync(backingPath);
+        if (bytes.length > BACKING_MAX_BYTES) {
+          throw new BackingError(`伴奏文件超过 ${BACKING_MAX_BYTES / 1024 / 1024} MB`);
+        }
+        audio = mixVocalWithBacking(out.audio, bytes).wav;
+      } catch (err) {
+        backingNote = `伴奏没用上：${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
     const player = this.player;
     try {
       if (!player) throw new Error('本机播放器未就绪');
-      const head = parseWavHeader(out.audio);
+      const head = parseWavHeader(audio);
       if (!head) throw new Error('输出不是合法的 WAV');
       if (head.channels !== 1 || head.bitsPerSample !== 16) {
         throw new Error(`只支持单声道 16-bit PCM，这一句是 ${head.channels} 声道 / ${head.bitsPerSample}-bit`);
       }
-      await player.write(head.sampleRate, out.audio.subarray(head.dataStart));
+      await player.write(head.sampleRate, audio.subarray(head.dataStart));
       await player.flush();
     } catch (err) {
       return {
@@ -714,11 +769,19 @@ export class SingerWorld implements World {
         failed: true,
       };
     }
-    this.log?.info('桌宠里唱了一句', { seconds: out.seconds, ms: out.ms, bytes: out.audio.length, rvc: out.rvc });
+    this.log?.info('桌宠里唱了一句', { seconds: out.seconds, ms: out.ms, bytes: audio.length, rvc: out.rvc, backing: backingPath });
     // 回执正文就是这一句歌词：模型原样交给 pet_say，气泡内容与这次唱的一致，
     // 而且此刻第一块 PCM 已经进了声卡输出流，气泡不会跑到声音前面。
-    // RVC 没换成时补一句短说明（没装 / 没运行 / 超时 / 转换失败），不让它静默退回原声。
-    return { text: out.rvcNote ? `${job.lyrics}\n（${out.rvcNote}）` : job.lyrics };
+    // RVC / 伴奏没成功时补一句短说明，不让它静默退回原声。
+    const notes = [out.rvcNote, backingNote].filter((note): note is string => !!note);
+    const text = notes.length ? `${job.lyrics}\n（${notes.join('；')}）` : job.lyrics;
+    // `hear`：把这一句的 wav（含伴奏）作为附件回给模型；上游支持音频（如 Gemini）时它能真的听到，
+    // 不支持音频的模型只会拿到 fallbackText，不额外增加噪音。
+    if (args.hear !== true) return { text };
+    return {
+      text,
+      blobs: [{ bytes: new Uint8Array(audio), mime: 'audio/wav', name: 'sung.wav', fallbackText: '（这一句的录音，wav）' }],
+    };
   }
 
   /** 配置里的声库变了就地重建引擎；音色每句现读，不用重启。 */
@@ -787,6 +850,15 @@ export class SingerWorld implements World {
     const dry = join(tmpDir, `${randomUUID()}.wav`);
     const at = Date.now();
     try {
+      // 指定旋律：compose 那套 lead-sheet 文本在这里解析成音符，交给 worker 对齐歌词。
+      let notes: Array<{ midi: number | null; beats: number }> | undefined;
+      if (job.melody) {
+        try {
+          notes = parseMelody(job.melody, job.meter);
+        } catch (err) {
+          throw new SingerError('param', err instanceof Error ? err.message : String(err));
+        }
+      }
       const done = await engine.sing({
         out: dry,
         lyrics: job.lyrics,
@@ -801,6 +873,7 @@ export class SingerWorld implements World {
         maxSeconds: job.maxSeconds,
         // 接口没指定音色时用配置里的默认音色（声库自带的 Normal / Soft…）。
         speaker: job.speaker || this.opts.cfg.voiceColor.trim() || undefined,
+        notes,
       });
       let audio: Buffer = readFileSync(dry);
       let rvc = false;

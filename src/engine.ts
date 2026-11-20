@@ -72,6 +72,8 @@ export interface SingRequest {
   maxSeconds: number;
   /** 音色（声库自带的说话人短名，如 Normal / Soft）；空为第一个。 */
   speaker?: string;
+  /** 指定旋律（已解析成音符）；不传则由 worker 按调式生成。 */
+  notes?: Array<{ midi: number | null; beats: number }>;
 }
 
 export interface SingDone {
@@ -194,6 +196,7 @@ export class SingerEngine {
         gender: req.gender,
         maxSeconds: req.maxSeconds,
         speaker: req.speaker ?? '',
+        ...(req.notes?.length ? { notes: req.notes } : {}),
       });
       try {
         child.stdin.write(`${line}\n`);

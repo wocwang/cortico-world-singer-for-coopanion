@@ -27,7 +27,7 @@ describe('wavFromPcm', () => {
     const pcm = Buffer.from([1, 2, 3, 4]);
     const out = wavFromPcm(pcm, 48000);
     expect(out.length).toBe(44 + pcm.length);
-    expect(parseWavHeader(out)).toEqual({ sampleRate: 48000, channels: 1, bitsPerSample: 16, dataStart: 44 });
+    expect(parseWavHeader(out)).toEqual({ sampleRate: 48000, channels: 1, bitsPerSample: 16, dataStart: 44, dataBytes: 4 });
     expect(out.subarray(44)).toEqual(pcm);
   });
 
@@ -62,6 +62,7 @@ describe('parseWavHeader', () => {
       channels: 1,
       bitsPerSample: 16,
       dataStart: 44,
+      dataBytes: 4,
     });
   });
 

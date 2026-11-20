@@ -59,6 +59,11 @@ export interface SingerConfigSection {
   keyShift: number;
   /** 默认调式。 */
   scale: SingerScale;
+  /**
+   * 与「作曲」插件联动：开着且部署里装了 cortico-world-compose 时，桌宠 / 对话页不再自己生成旋律，
+   * 而是先让模型调 compose_phrase 写出 line、再交给 `singer_sing` 的 melody 唱。
+   */
+  composeLink: boolean;
   /** 唱歌时用歌词气泡带动桌宠嘴型；关掉后不再为嘴型额外调 pet_say。 */
   mouthAnimation: boolean;
   /** 干声再走一遍 RVC，换成小肥鱼/星落落大肥鱼的音色；默认关。 */
@@ -107,6 +112,8 @@ export const SINGER_DEFAULTS: SingerConfigSection = {
   bpm: 96,
   keyShift: 0,
   scale: 'major',
+  // 联动要依赖另一个插件，默认关；想用「写一段 → 补完 → 唱」的流程再打开。
+  composeLink: false,
   mouthAnimation: true,
   rvcEnabled: false,
   rvcEndpoint: DEFAULT_RVC_ENDPOINT,
@@ -149,6 +156,7 @@ const TEXT = {
     bpm: { title: '默认速度（BPM）', description: '60..200；每字时值按拍折算。' },
     keyShift: { title: '默认移调（半音）', description: '−12..12，正数更高。绮萱是女声，一般 0 到 +4。' },
     scale: { title: '默认调式', description: '大调明亮，小调忧郁；旋律按起承转合在所选调式里生成。' },
+    composeLink: { title: '与作曲插件联动', description: '开启后，如果部署里装了「作曲」插件（cortico-world-compose），桌宠 / 对话页不再由 DiffSinger 现编旋律：模型会先调 compose_phrase 写一段，再把那条 lead-sheet 旋律放进 singer_sing 的 melody 唱出来（「写一段 → 补完 → 唱」）。没检测到作曲插件时仍按原来的方式自动生成；面板试听与 HTTP 接口不受影响。' },
     mouthAnimation: { title: '唱歌时让嘴型动起来', description: '开启后，每句唱完用 pet_say 显示同一句歌词，气泡会带动桌宠嘴型；这一句结束气泡自然消失、嘴闭上。关闭后不再调 pet_say 带动嘴型，歌词只放在普通回复里。桌面宠物的嘴只跟气泡走，这是插件侧能做到的动画，不是逐字音频口型。' },
     scaleMajor: '大调',
     scaleMinor: '小调',
@@ -185,6 +193,7 @@ const TEXT = {
     bpm: { title: 'Default tempo (BPM)', description: '60..200; note lengths are derived from the beat.' },
     keyShift: { title: 'Default transpose (semitones)', description: '−12..12, positive is higher. Qixuan is a female voice, usually 0 to +4.' },
     scale: { title: 'Default scale', description: 'Major is bright, minor is moody; the melody follows a four-phrase arc in that scale.' },
+    composeLink: { title: 'Link with the compose plugin', description: 'When on and the compose world (cortico-world-compose) is installed, the pet and chat no longer let DiffSinger invent the melody: the model first calls compose_phrase, then passes that lead-sheet line to singer_sing as melody (write a phrase, finish it, sing it). If compose is not detected, the old auto-melody path stays; the panel preview and the HTTP API are unaffected.' },
     mouthAnimation: { title: 'Move the mouth while singing', description: 'On shows each sung line in a pet_say bubble, so the pet mouth moves with the line and closes when the bubble ends. Off stops the mouth-driven pet_say call and leaves the lyric in an ordinary reply. The desktop pet mouth follows bubbles only, so this is plugin-side motion, not per-word audio lip sync.' },
     scaleMajor: 'Major',
     scaleMinor: 'Minor',
@@ -220,6 +229,7 @@ export function configGroups(language: Language): ConfigGroup[] {
           [`${K}.bpm`]: { type: 'number', title: t.bpm.title, description: t.bpm.description, minimum: BPM_MIN, maximum: BPM_MAX, multipleOf: 1 },
           [`${K}.keyShift`]: { type: 'number', title: t.keyShift.title, description: t.keyShift.description, minimum: KEY_SHIFT_MIN, maximum: KEY_SHIFT_MAX, multipleOf: 1 },
           [`${K}.scale`]: { type: 'string', title: t.scale.title, description: t.scale.description, 'x-options': SCALE_OPTIONS },
+          [`${K}.composeLink`]: { type: 'boolean', title: t.composeLink.title, description: t.composeLink.description },
           [`${K}.mouthAnimation`]: { type: 'boolean', title: t.mouthAnimation.title, description: t.mouthAnimation.description },
         },
       },
