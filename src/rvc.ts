@@ -2,9 +2,9 @@
  * 可选的 RVC 后处理：把绮萱的干声 POST 给 RVC 插件（默认 `127.0.0.1:9881/convert`），
  * 换成小肥鱼 / 星落落大肥鱼的音色。
  *
- * RVC 插件挂载时就会拉起自己的引擎并先开 `/health`，引擎载入要十几到三十秒；
- * 所以先用 `waitForRvc` 探 `/health` 等到 `ready:true` 再送干声，而不是一上来就 POST 吃 409。
- * 等待有明确上限；拉不起来（没装 / 没运行 / 超时）时由调用方退回绮萱原声，并把原因写进回执。
+ * RVC 的引擎是懒启动的：`/health` 只回报状态，`/convert` 收到请求才会 `ensureReady()` 拉起引擎
+ * （冷启动约 25–30 秒）。所以这里先用 `wakeRvc` 只确认接口通不通，通了就直接送干声，
+ * 让 RVC 自己启动；接口不通（没装 / 没启用 / 关了 HTTP）时由调用方退回绮萱原声，并把原因写进回执。
  *
  * 后处理是锦上添花，任何失败都不该让一次演唱失败。
  */
@@ -67,31 +67,28 @@ export async function probeRvc(endpoint: string, opts: { token?: string; timeout
 }
 
 /**
- * 等 RVC 真正可转换。接口一直不通只等 `appearMs`（默认 4 秒）就放弃；
- * 接口通但引擎还在载入，则一直等到 `budgetMs`。
+ * 确认 RVC 接口能接活，**不要求引擎已载入**。
+ *
+ * RVC 的引擎是懒启动的：`/health` 只回报 `ready:false`、不会拉起引擎，
+ * 只有 `POST /convert` 进来时它才 `ensureReady()` 自己启动（`autoStart` 默认关、闲置回收后也靠请求触发）。
+ * 所以这里只区分「接口通了」和「端口不通」：通了就把干声交给 `/convert`，启动与等待都归 RVC。
+ * 端口不通时最多等 `appearMs`（默认 4 秒）给「插件刚挂载」留余量。
  */
-export async function waitForRvc(
+export async function wakeRvc(
   endpoint: string,
-  opts: { token?: string; budgetMs: number; appearMs?: number; pollMs?: number },
-): Promise<{ ok: true } | { ok: false; reason: 'timeout' | 'down'; waitedMs: number; detail: string }> {
+  opts: { token?: string; appearMs?: number; pollMs?: number } = {},
+): Promise<{ ok: true; state: 'ready' | 'starting' } | { ok: false; detail: string }> {
   const started = Date.now();
-  const budget = Math.max(0, opts.budgetMs);
   const appear = Math.max(0, opts.appearMs ?? APPEAR_MS);
-  let starting = false;
   let detail = '';
   for (;;) {
     const probe = await probeRvc(endpoint, { token: opts.token });
-    if (probe.state === 'ready') return { ok: true };
-    if (probe.state === 'starting') starting = true;
+    if (probe.state === 'ready') return { ok: true, state: 'ready' };
+    // `ready:false` 既可能是正在载入，也可能是闲置 / 未预热停着；两种都直接交给 /convert 处理。
+    if (probe.state === 'starting') return { ok: true, state: 'starting' };
     detail = probe.detail;
-    const elapsed = Date.now() - started;
-    if (elapsed >= budget) {
-      return { ok: false, reason: starting ? 'timeout' : 'down', waitedMs: elapsed, detail };
-    }
-    if (!starting && elapsed >= appear) {
-      return { ok: false, reason: 'down', waitedMs: elapsed, detail };
-    }
-    await sleep(Math.min(opts.pollMs ?? POLL_MS, Math.max(0, budget - elapsed)));
+    if (Date.now() - started >= appear) return { ok: false, detail };
+    await sleep(Math.min(opts.pollMs ?? POLL_MS, Math.max(0, appear - (Date.now() - started))));
   }
 }
 

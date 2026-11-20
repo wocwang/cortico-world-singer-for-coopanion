@@ -87,7 +87,7 @@ class FakePlayer implements WavPlayer {
     this.writes.push({ sampleRate, bytes: pcm.length });
   }
 
-  flush(): void { this.flushes += 1; }
+  async flush(): Promise<void> { this.flushes += 1; }
   cut(): void {}
   close(): void {}
 }

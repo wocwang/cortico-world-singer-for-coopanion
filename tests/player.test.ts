@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { upmix } from '../src/player.ts';
+import { applyGain, wavFromPcm } from '../src/player.ts';
 import { parseWavHeader } from '../src/wav.ts';
 
 /** 拼一个标准 PCM wav 头（44 字节），data 段默认 4 字节（两个采样）。 */
@@ -22,17 +22,36 @@ function wav(opts: { sampleRate?: number; channels?: number; bits?: number; data
   return Buffer.concat([head, Buffer.alloc(dataBytes)]);
 }
 
-describe('upmix', () => {
-  it('单声道采样复制成左右两路', () => {
-    const mono = Buffer.from([1, 2, 3, 4]);
-    const out = upmix(mono, 2);
-    expect(out.length).toBe(mono.length * 2);
-    expect([...out]).toEqual([1, 2, 1, 2, 3, 4, 3, 4]);
+describe('wavFromPcm', () => {
+  it('拼出的 WAV 能被 parseWavHeader 按 44 字节 data 解析', () => {
+    const pcm = Buffer.from([1, 2, 3, 4]);
+    const out = wavFromPcm(pcm, 48000);
+    expect(out.length).toBe(44 + pcm.length);
+    expect(parseWavHeader(out)).toEqual({ sampleRate: 48000, channels: 1, bitsPerSample: 16, dataStart: 44 });
+    expect(out.subarray(44)).toEqual(pcm);
   });
 
-  it('一道路不用展开', () => {
-    const mono = Buffer.from([1, 2, 3, 4]);
-    expect(upmix(mono, 1)).toBe(mono);
+  it('RIFF 长度与 data 长度一致', () => {
+    const out = wavFromPcm(Buffer.alloc(100), 44100);
+    expect(out.readUInt32LE(4)).toBe(36 + 100);
+    expect(out.readUInt32LE(40)).toBe(100);
+    expect(out.readUInt32LE(28)).toBe(44100 * 2); // byteRate
+  });
+});
+
+describe('applyGain', () => {
+  it('增益为 1 时原样返回', () => {
+    const pcm = Buffer.from([1, 2]);
+    expect(applyGain(pcm, 1)).toBe(pcm);
+  });
+
+  it('超过拐点的样本被压到满幅以内', () => {
+    const pcm = Buffer.alloc(2);
+    pcm.writeInt16LE(32000, 0);
+    const out = applyGain(pcm, 1.5);
+    const v = out.readInt16LE(0);
+    expect(v).toBeLessThanOrEqual(32767);
+    expect(v).toBeGreaterThan(24000);
   });
 });
 

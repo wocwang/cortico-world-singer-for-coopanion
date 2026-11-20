@@ -1,5 +1,33 @@
 # 更新记录
 
+## 0.1.30（2026-11-17）修复唱歌时整个 Coopanion 被 abort（exit 134）
+
+- 现象：桌宠里唱到一半（或紧接着再唱一句）时，角色消失、过一会儿像刚启动一样落回来；
+  其实是**整个 Coopanion 主进程崩溃后自动重启**。
+- 根因：gpt-sovits 与唱歌插件各自随包带了一份 `audify.node`。同一个 N-API 模块在同一个
+  Electron 主进程里注册第二次时，`node::AddEnvironmentCleanupHook` 断言 `result.second`
+  失败，进程直接 abort（日志里 `exit 134`，栈顶 `loadAudify`）。
+- 修法：**不再加载任何原生模块**。本机播放改成把整句 PCM 落成临时 WAV，交给系统自带的
+  播放器在独立子进程里播（Windows 用 PowerShell 的 `Media.SoundPlayer`，macOS 用 `afplay`），
+  一句接一句排队；播放器报「started」后 `flush()` 才返回，气泡与声音仍然同时开始。
+- 包体去掉 `vendor/audify/`（约 840 KB 与三份第三方许可证），`files` 同步移除 `vendor`。
+- `WavPlayer.flush()` 改为异步（等真正开始出声）；`cut()` 杀掉播放子进程并清空队列。
+- 验证：`tsc --noEmit`、`vitest run` 101 个用例全绿；真机用新播放器放 1.5 秒正弦音，
+  播放器在 1.2 秒内报「已开始」并完整播完（PowerShell 冷启动开销，之后每句只多这一次等待）。
+
+## 0.1.29（2026-11-17）RVC 懒启动：直接送 `/convert`，不再空等 `/health`
+
+- 修：RVC 的 `autoStart` 默认关、闲置回收也靠请求触发；它的 `/health` 只回报 `ready:false`、不会拉起引擎，
+  只有 `POST /convert` 进来才 `ensureReady()` 自己启动。旧逻辑轮询 `/health` 等 ready，永远等不到，
+  于是每次都是「超时 → 退回绮萱原声」，RVC 一次请求都没收到。
+- 改：`waitForRvc` 换成 `wakeRvc`——只确认接口通不通（`ready` / `ready:false` 都放行，端口不通等 4 秒），
+  通了就直接送干声，RVC 在这次请求里完成「启动 + 转换」。
+- 外放链路的转换上限从 30 秒放宽到 50 秒（含 RVC 冷启动约 25–30 秒），仍赶在 `singer_sing` 的 60 秒窗口内；
+  接口与面板仍为 180 秒。去掉不再需要的「等就绪」预算与 `rvcWaitMs`。
+- 失败说明保留并更清楚：接口没响应、令牌不对、RVC 手动停了引擎（`/convert` 回 409）都会写进回执/气泡，
+  并用绮萱原声唱完；409 时提示去 RVC 插件的服务页点「启动引擎」——那边手动停过之后按设计不再按需拉起。
+- 验证：`tsc --noEmit`、`vitest run` 98 个用例全绿（RVC 探测用例按新语义改写）。
+
 ## 0.1.28（2026-11-17）RVC 后处理先等就绪，失败说明原因
 
 - 开 RVC 时先探它的 `/health`，等到 `ready:true` 再送干声，不再一上来就吃 409；

@@ -21,7 +21,7 @@ import {
 } from './config.ts';
 import { SingerEngine, SingerError, type EngineState } from './engine.ts';
 import { SingerInstaller } from './install.ts';
-import { rvcPost, waitForRvc } from './rvc.ts';
+import { rvcPost, wakeRvc } from './rvc.ts';
 import { Player, type WavPlayer } from './player.ts';
 import { SINGER_TOOL_DECLS } from './tools.ts';
 import { parseWavHeader } from './wav.ts';
@@ -38,23 +38,22 @@ import { VOCODER_PAGE, VOICEBANK_PAGE, VOICEBANK_VERSION } from './catalog.ts';
 const WORKER_SCRIPT = fileURLToPath(new URL('./python/worker.py', import.meta.url));
 /** 告诉模型「在哪唱歌、怎么点歌」的环境提示词模板。 */
 const ENV_PROMPT_PATH = fileURLToPath(new URL('../prompts/env.md', import.meta.url));
-const VERSION = '0.1.16';
+const VERSION = '0.1.30';
 /** `singer_sing` 等这一句唱进声卡的上限：整句批式合成 0.5–11 秒，再加 RVC 最多 20 秒，留足余量。 */
 const SING_ALOUD_MAX_MS = 90_000;
 /** 换声库时最多等旧引擎把排队的句子唱完（超时也照样切，别把用户卡死）。 */
 const SWITCH_DRAIN_MS = 180_000;
-/** 桌宠外放时等 RVC 就绪 / 转换的上限：超时就播原声，别把「气泡等声音」一起拖住。 */
-const RVC_ALOUD_WAIT_MS = 25_000;
-const RVC_ALOUD_CONVERT_MS = 30_000;
+/**
+ * 桌宠外放时一次 RVC 转换的上限：含 RVC 引擎懒启动（约 25–30 秒），
+ * 压到 50 秒以内，好让整句仍赶在 `singer_sing` 的 60 秒气泡窗口里出结果。
+ */
+const RVC_ALOUD_CONVERT_MS = 50_000;
 /** 接口与面板没有「气泡等着」的压力，可以多等一会儿冷启动。 */
-const RVC_HTTP_WAIT_MS = 60_000;
 const RVC_HTTP_CONVERT_MS = 180_000;
 
-/** 一次演唱的可选行为；接口与面板走默认值，桌宠外放压短 RVC 的等待。 */
+/** 一次演唱的可选行为；接口与面板走默认值，桌宠外放压短 RVC 的转换上限。 */
 interface SingOptions {
-  /** 等 RVC 就绪的上限（毫秒）。 */
-  rvcWaitMs?: number;
-  /** 单次转换的上限（毫秒）；不传用 rvcPost 的默认值。 */
+  /** 单次转换的上限（毫秒，含 RVC 冷启动）；不传用 rvcPost 的默认值。 */
   rvcTimeoutMs?: number;
 }
 
@@ -65,7 +64,7 @@ export interface SingerWorldOptions {
   runtimesRoot: () => string;
   /** 建引擎的工厂；单测里注入假引擎用，不传就按配置建真的 `SingerEngine`。 */
   createEngine?: (init: EngineInit) => SingerEngine;
-  /** 建本机播放器；单测里注入假播放器用，不传就用随包 audify 的真播放器。 */
+  /** 建本机播放器；单测里注入假播放器用，不传就用系统播放器（独立子进程，不加载原生模块）。 */
   createPlayer?: (log: Logger) => WavPlayer;
 }
 
@@ -693,8 +692,9 @@ export class SingerWorld implements World {
     if (args.scale !== undefined) this.tune.scale = job.scale;
     let out: SingOutcome;
     try {
-      // 外放链路：等 RVC 就绪最多 25 秒、转换 30 秒；超时或失败就播原声，不让这一句卡住。
-      out = await this.sing(job, { rvcWaitMs: RVC_ALOUD_WAIT_MS, rvcTimeoutMs: RVC_ALOUD_CONVERT_MS });
+      // 外放链路：RVC 冷启动（约 25–30 秒）也算在这一次转换里，最多 50 秒；
+      // 超时或失败就播原声，不让这一句卡住。
+      out = await this.sing(job, { rvcTimeoutMs: RVC_ALOUD_CONVERT_MS });
     } catch (err) {
       return { text: `Nothing sung: ${err instanceof Error ? err.message : String(err)}.`, failed: true };
     }
@@ -707,7 +707,7 @@ export class SingerWorld implements World {
         throw new Error(`只支持单声道 16-bit PCM，这一句是 ${head.channels} 声道 / ${head.bitsPerSample}-bit`);
       }
       await player.write(head.sampleRate, out.audio.subarray(head.dataStart));
-      player.flush();
+      await player.flush();
     } catch (err) {
       return {
         text: `Sang one line but could not play it on this computer: ${err instanceof Error ? err.message : String(err)}.`,
@@ -766,9 +766,8 @@ export class SingerWorld implements World {
     }
   }
 
-  /** 没等到 RVC 能转换时，回执里怎么讲清是哪一种：超时 / 令牌 / 已安装没运行 / 没装。 */
-  private rvcDownReason(endpoint: string, reason: 'timeout' | 'down', waitMs: number, detail: string): string {
-    if (reason === 'timeout') return `RVC 启动超时（${Math.round(waitMs / 1000)} 秒内未就绪）`;
+  /** RVC 接口没响应时，回执里怎么讲清是哪一种：令牌 / 已安装没运行 / 没装。 */
+  private rvcDownReason(endpoint: string, detail: string): string {
     if (detail.includes('401')) return 'RVC 接口要求令牌（或令牌不匹配）';
     const installed = rvcPackageInstalled(this.opts.runtimesRoot());
     if (installed === true) return 'RVC 已安装但接口没响应（插件没启用或关了 HTTP 接口）';
@@ -808,12 +807,13 @@ export class SingerWorld implements World {
       let rvcNote: string | undefined;
       if (this.opts.cfg.rvcEnabled) {
         const endpoint = this.opts.cfg.rvcEndpoint;
-        const waitMs = opts.rvcWaitMs ?? RVC_HTTP_WAIT_MS;
-        // RVC 插件挂载时就会开始载入引擎；先等 /health 的 ready，而不是直接 POST 吃 409。
-        const ready = await waitForRvc(endpoint, { budgetMs: waitMs });
-        if (!ready.ok) {
-          rvcNote = `${this.rvcDownReason(endpoint, ready.reason, waitMs, ready.detail)}，本次用绮萱原声`;
-          this.log?.warn('RVC 没就绪，本次用绮萱原声', { endpoint, reason: ready.reason, waitedMs: ready.waitedMs });
+        // RVC 的引擎是懒启动：`/health` 只回报状态、不拉起引擎，只有 `/convert` 收到请求才会自己启动
+        // （`autoStart` 默认关、闲置回收后也靠请求触发）。所以这里只确认接口通不通，
+        // 通了就直接把干声送过去，让 RVC 在这一次请求里完成启动 + 转换。
+        const awake = await wakeRvc(endpoint);
+        if (!awake.ok) {
+          rvcNote = `${this.rvcDownReason(endpoint, awake.detail)}，本次用绮萱原声`;
+          this.log?.warn('RVC 接口没响应，本次用绮萱原声', { endpoint, detail: awake.detail });
         } else {
           const converted = await rvcPost(audio, {
             endpoint,
@@ -833,6 +833,11 @@ export class SingerWorld implements World {
           } else if (converted.ok) {
             rvcNote = 'RVC 返回的音频不是单声道 16-bit，本次用绮萱原声';
             this.log?.warn('RVC 返回的音频不是单声道 16-bit，本次用绮萱原声', { endpoint });
+          } else if (converted.detail.includes('HTTP 409')) {
+            // RVC 自己在请求里 try 过拉起引擎仍不行：多半是有人在 RVC 面板点过「停止引擎」，
+            // 那之后它按设计不再按需启动（或引擎上次启动失败）。这只能由主人到它面板上处理。
+            rvcNote = 'RVC 引擎没在运行（手动停止后它不会按需拉起）：到 RVC 插件的服务页点「启动引擎」，本次用绮萱原声';
+            this.log?.warn('RVC 拒绝按需启动，本次用绮萱原声', { endpoint, detail: converted.detail });
           } else {
             rvcNote = `RVC 转换失败（${short(converted.detail)}），本次用绮萱原声`;
             this.log?.warn('RVC 后处理失败，本次用绮萱原声', { endpoint, detail: converted.detail });

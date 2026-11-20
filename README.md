@@ -148,8 +148,9 @@ curl -sS -X POST http://127.0.0.1:9882/sing \
 
 - **说话**走 gpt-sovits；**唱歌**走本插件；
 - 想让歌声也换成你训练的音色，把本插件的「RVC 后处理」打开（`indexRate` / `protect` 可调）；
-  外放时会先等 RVC 就绪（最多 25 秒；接口/面板 60 秒）再送干声，不会一上来吃 409。
-  RVC 没装、插件没启用、启动超时或转换失败，本次都用绮萱原声唱完，并在回执/气泡里写明是哪一种；
+  RVC 的引擎是懒启动的（`/health` 只回报状态、`/convert` 收到请求才拉起），所以本插件只探接口通不通，
+  通了就直接把干声交给它，冷启动（约 25–30 秒）与转换都算在那一次请求里（外放最多等 50 秒）；
+  接口没响应或转换失败，本次用绮萱原声唱完，并在回执/气泡里写明原因；
   三个插件的启动顺序不用再手动凑；
 - QQ 里点歌是「gpt-sovits 的语音接口收到 `【唱】` → 转给本插件 → 唱好回传」，所以三个插件要同时在运行。
 - 桌宠 / 对话页的唱歌**不再依赖 gpt-sovits**：本插件自己合成、自己写声卡（`singer_sing`）；只有 QQ 点歌仍然要三个插件在运行；
@@ -234,7 +235,7 @@ worker 在启动时给每个阶段包了一层，按后缀把 `variance_Soft` �
 | `voicebank` | 空 | 从总目录里选的声库文件夹名；空则用 `voicebankDir` |
 | `voiceColor` | 空 | 音色（`Normal` / `Soft`…）；空用第一个 |
 | `bpm` / `keyShift` / `scale` | 96 / 0 / `major` | 面板与接口的默认值 |
-| `rvcEnabled` | false | 干声再过一遍 RVC；先等 RVC 就绪（外放 25 秒、接口 60 秒），失败会说明原因并回原声 |
+| `rvcEnabled` | false | 干声再过一遍 RVC；直接交给 `/convert` 让 RVC 懒启动引擎（外放最多等 50 秒），失败会说明原因并回原声 |
 | `rvcEndpoint` | `http://127.0.0.1:9881` | RVC 插件接口地址 |
 | `rvcVoice` | 空 | `.pth` 名（不含扩展名）；空用 RVC 插件的默认音色 |
 | `httpApi` / `httpPort` / `httpToken` | true / 9882 / 空 | 本机接口开关、端口、令牌 |
@@ -257,13 +258,10 @@ npx tsx scripts/smoke.mts   # 真实链路：起 World → /health → POST /sin
 
 ## 第三方组件
 
-本机播放用随包的 audify 预编译件（`vendor/audify/`），不从 npm 安装、不在安装时下载：
-
-| 组件 | 用途 | 版本 / 来源 | 许可证 |
-| --- | --- | --- | --- |
-| audify | Node ↔ RtAudio 绑定 | 1.10.1 官方 napi-v10 win32-x64 预编译件 | MIT（`vendor/audify/LICENSE`） |
-| RtAudio | 打开系统输出流（Windows 上走 WASAPI） | 随 audify 预编译件附带 | `vendor/audify/LICENSE.rtaudio` |
-| Opus | audify 预编译件的依赖 | 随 audify 预编译件附带 | BSD（`vendor/audify/COPYING.opus`） |
+本插件没有随包的原生模块：本机播放把整句 PCM 落成临时 WAV，交给系统自带的播放器
+（Windows 用 PowerShell 的 `Media.SoundPlayer`，macOS 用 `afplay`）在独立子进程里播。
+不加载 audify / RtAudio 一类的 N-API 模块，避免和 gpt-sovits 各自带的那份在同一个
+Electron 主进程里重复注册、把整个进程 abort。
 
 ## 许可与合规
 
