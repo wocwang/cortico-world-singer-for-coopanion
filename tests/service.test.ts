@@ -5,7 +5,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Logger, WorldHost } from 'cortico/core/types.ts';
 import { SINGER_DEFAULTS, type SingerConfigSection } from '../src/config.ts';
 import type { EngineState, SingerEngine, SingRequest } from '../src/engine.ts';
-import { SingerWorld, type EngineInit } from '../src/world.ts';
+import type { SingerInstaller } from '../src/install.ts';
+import type { RuntimeInstall } from '../src/runtime.ts';
+import type { SingerVenv } from '../src/venv.ts';
+import { SingerWorld, type EngineInit, type SingerWorldOptions } from '../src/world.ts';
 
 const roots: string[] = [];
 const worlds: SingerWorld[] = [];
@@ -60,7 +63,11 @@ function makeFake(): Fake {
   return fake;
 }
 
-function makeWorld(device?: SingerConfigSection['device'], autoStart?: boolean): {
+function makeWorld(
+  device?: SingerConfigSection['device'],
+  autoStart?: boolean,
+  extra: Partial<SingerWorldOptions> = {},
+): {
   cfg: SingerConfigSection;
   dataDir: string;
   fake: Fake;
@@ -85,6 +92,7 @@ function makeWorld(device?: SingerConfigSection['device'], autoStart?: boolean):
     dataDir,
     runtimesRoot: () => join(dataDir, 'runtimes'),
     createEngine: (init: EngineInit) => { inits.push(init); return fake as unknown as SingerEngine; },
+    ...extra,
   });
   worlds.push(world);
   const invoke = (method: string, args: unknown[] = []): Promise<unknown> =>
@@ -94,6 +102,53 @@ function makeWorld(device?: SingerConfigSection['device'], autoStart?: boolean):
 
 /** bootEngine 是后台起的：等一个宏任务让它把假引擎拉到 ready。 */
 const nextTick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** 假声库安装任务：`install` 一直挂着，等 `finish()` 才结束，用来模拟下载中。 */
+class FakeInstaller {
+  state: { phase: 'absent' | 'working' | 'ready' | 'error'; done: number; total: number; detail: string | null } =
+    { phase: 'absent', done: 0, total: 100, detail: null };
+  installs = 0;
+  cancels = 0;
+  private finishInstall: (() => void) | null = null;
+
+  status(): typeof this.state { return { ...this.state }; }
+
+  install(): Promise<void> {
+    this.installs += 1;
+    this.state = { phase: 'working', done: 10, total: 100, detail: null };
+    return new Promise((resolve) => { this.finishInstall = resolve; });
+  }
+
+  cancel(): void { this.cancels += 1; }
+  voicebankReady(): boolean { return this.state.phase === 'ready'; }
+  vocoderReady(): boolean { return this.state.phase === 'ready'; }
+
+  finish(): void {
+    this.state = { phase: 'ready', done: 100, total: 100, detail: null };
+    this.finishInstall?.();
+    this.finishInstall = null;
+  }
+}
+
+/** 假派生 venv：check 就绪，ensure 立即成功。 */
+class FakeVenv {
+  phase: 'absent' | 'working' | 'ready' | 'error' = 'ready';
+  state(): { phase: string; detail: null } { return { phase: this.phase, detail: null }; }
+  check(): Promise<{ phase: string; detail: null }> { return Promise.resolve(this.state()); }
+  ensure(): Promise<void> { this.phase = 'ready'; return Promise.resolve(); }
+  cancel(): void {}
+}
+
+/** 假共享运行时：第一次 ensure 就装好。 */
+class FakeRuntime {
+  phase: 'absent' | 'working' | 'ready' | 'error' = 'absent';
+  ready(): boolean { return this.phase === 'ready'; }
+  status(): { phase: string; done: number; total: number; detail: null } {
+    return { phase: this.phase, done: 0, total: 1, detail: null };
+  }
+  ensure(): Promise<boolean> { this.phase = 'ready'; return Promise.resolve(true); }
+  cancel(): void {}
+}
 
 interface State {
   phase: string;
@@ -226,5 +281,80 @@ describe('推理服务手动启停', () => {
     // 假部署里没有派生 venv：重启只把服务开关拨回来，不会凭空载入引擎（真部署里 venv 就绪才 boot）。
     expect(fake.starts).toBe(1);
     expect((await invoke('state')) as State).toMatchObject({ service: true, phase: 'stopped' });
+  });
+});
+
+describe('一键安装的实例归属', () => {
+  it('换共享运行时后下载跑在当前 installer 上，重入/重启被挡住，取消打到同一个实例', async () => {
+    const installers: FakeInstaller[] = [];
+    const runtimes: FakeRuntime[] = [];
+    const { world, invoke, inits } = makeWorld(undefined, true, {
+      createInstaller: () => {
+        const fake = new FakeInstaller();
+        installers.push(fake);
+        return fake as unknown as SingerInstaller;
+      },
+      createVenv: () => new FakeVenv() as unknown as SingerVenv,
+      createRuntime: () => {
+        const fake = new FakeRuntime();
+        runtimes.push(fake);
+        return fake as unknown as RuntimeInstall;
+      },
+    });
+    await world.start({ log } as unknown as WorldHost);
+    await nextTick();
+    expect(installers.length).toBe(1);
+
+    // 第一次点「一键安装」：运行时装好后 setup() 会换成第 2 代，下载必须落在第 2 代上。
+    const kicked = (await invoke('install')) as { installing: boolean };
+    expect(kicked.installing).toBe(true);
+    await nextTick();
+    expect(runtimes[0]?.phase).toBe('ready');
+    expect(installers.length).toBe(2);
+    const active = installers[1]!;
+    expect(active.installs).toBe(1);
+    expect((world as unknown as { installer: FakeInstaller }).installer).toBe(active);
+    expect((await invoke('state')) as { install: { phase: string }; installing: boolean })
+      .toMatchObject({ install: { phase: 'working' }, installing: true });
+
+    // 再点一次不会开第二份下载。
+    await invoke('install');
+    expect(active.installs).toBe(1);
+    expect(installers.length).toBe(2);
+
+    // 安装期间「重启引擎」不重建 setup，界面上的安装按钮也按 installing 禁用。
+    const before = inits.length;
+    await invoke('restart');
+    expect(inits.length).toBe(before);
+    expect((world as unknown as { installer: FakeInstaller }).installer).toBe(active);
+
+    // 取消打到正在下载的那个实例。
+    await invoke('cancel');
+    expect(active.cancels).toBe(1);
+
+    // 装完后面板恢复可操作。
+    active.finish();
+    await nextTick();
+    expect(((await invoke('state')) as { installing: boolean }).installing).toBe(false);
+  });
+
+  it('停用插件会取消正在跑的安装', async () => {
+    const installers: FakeInstaller[] = [];
+    const { world, invoke } = makeWorld(undefined, false, {
+      createInstaller: () => {
+        const fake = new FakeInstaller();
+        installers.push(fake);
+        return fake as unknown as SingerInstaller;
+      },
+      createVenv: () => new FakeVenv() as unknown as SingerVenv,
+      createRuntime: () => new FakeRuntime() as unknown as RuntimeInstall,
+    });
+    await world.start({ log } as unknown as WorldHost);
+    await invoke('install');
+    await nextTick();
+    const active = installers.at(-1)!;
+    expect(active.installs).toBe(1);
+    await world.stop();
+    expect(active.cancels).toBeGreaterThanOrEqual(1);
   });
 });

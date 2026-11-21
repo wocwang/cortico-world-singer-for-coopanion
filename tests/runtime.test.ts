@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { RuntimeInstall, runtimeDir, runtimeReady } from '../src/runtime.ts';
+import { RuntimeInstall, runtimeDir, runtimeReady, runtimeSources } from '../src/runtime.ts';
 
 const roots: string[] = [];
 const servers: Array<() => Promise<void>> = [];
@@ -19,6 +19,28 @@ const tempDir = (): string => {
   roots.push(dir);
   return dir;
 };
+
+describe('运行时下载来源', () => {
+  it('国内默认 ModelScope 优先，GitHub 包过镜像，官方直链兜底', () => {
+    const sources = runtimeSources();
+    expect(sources[0]).toContain('modelscope.cn');
+    expect(sources.some((url) => url.startsWith('https://ghfast.top/'))).toBe(true);
+    expect(sources.some((url) => url.startsWith('https://ghproxy.net/'))).toBe(true);
+    expect(sources.some((url) => url.startsWith('https://gh-proxy.com/'))).toBe(true);
+    expect(sources.at(-1)).toContain('github.com/Phantivia/cortico-world-gpt-sovits-for-coopanion');
+  });
+
+  it('设了代理时官方直链排最前', () => {
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7890';
+    try {
+      const sources = runtimeSources();
+      expect(sources[0]).toContain('github.com/Phantivia/cortico-world-gpt-sovits-for-coopanion');
+      expect(sources[1]).toContain('modelscope.cn');
+    } finally {
+      delete process.env.HTTPS_PROXY;
+    }
+  });
+});
 
 /** 造一个「存储」zip（不压缩），只放一个空文件，够跑通下载→校验→解压→落位。 */
 function storedZip(name: string): Buffer {

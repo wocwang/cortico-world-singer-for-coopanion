@@ -43,7 +43,7 @@ Coopanion 的 `kind: world` 插件：**让大肥鱼临场发挥、随意唱歌**
 
 模型不随包分发。打开面板「服务」→「安装依赖与声库」：
 
-1. 缺共享运行时的话先下它（CPU 档约 1 GB，ModelScope 优先、GitHub 兜底，SHA-256 校验后解压）；
+1. 缺共享运行时的话先下它（CPU 档约 1 GB，ModelScope 优先、GitHub 镜像兜底，SHA-256 校验后解压）；
 2. 建派生 venv 并补 `diffsinger-utau`（先走阿里云镜像，失败自动回官方 PyPI）；
 3. 下载绮萱声库（约 401 MB）与社区声码器（约 50 MB），断点续传，校验字节数与 SHA-256 后落位；
 4. 用派生 venv 的 Python 标准库就地解压：声库解到数据目录 `voicebank/`，声码器解到 `voicebank/dsvocoder/`，指纹文件（`dsconfig.yaml`、`dsvocoder/vocoder.yaml`）齐了才算装完，然后删掉两个压缩包；
@@ -51,9 +51,15 @@ Coopanion 的 `kind: world` 插件：**让大肥鱼临场发挥、随意唱歌**
 
 装依赖前会先停引擎——worker 在跑时 `pip` 覆盖不了 venv 里的 `.pyd/.dll`。
 
-下载来源默认「镜像优先、官方兜底」：绮萱包（401 MB）实测 ghfast 稳定返回 403，顺序是
-gh-proxy → ghproxy.net → 官方 → ghfast；声码器仍是 ghfast → gh-proxy → 官方。
-设了 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 时官方一律排最前
+下载来源默认「国内镜像优先、官方兜底」：
+
+- 共享运行时：ModelScope → ghfast → ghproxy.net → gh-proxy → 官方 GitHub；
+- 绮萱声库（401 MB）：gh-proxy → ghproxy.net → 官方 → ghfast（ghfast 对这个包稳定返回 403）；
+- 声码器：ghfast → gh-proxy → 官方。
+
+2026-11-21 在国内宽带上实测（每个源拉 1 MB）：ModelScope 约 1.4 MB/s、ghfast 约 0.3 MB/s、
+gh-proxy 约 0.2 MB/s、ghproxy.net 约 0.18 MB/s；官方 GitHub 直连在 Node 里证书校验失败，
+设了代理后可用。设了 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 时官方一律排最前
 （代理通常已经把 GitHub 打通，不必再多跳一次镜像）。来源在起步 10 秒后按 6 秒窗口采样、
 平均速度低于 100 KB/s 就会被放弃并换下一个，已下的部分带 `Range` 续传，不会卡在慢源上；
 最后一个来源不按速度放弃（再慢也比装不上强）。

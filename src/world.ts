@@ -40,7 +40,7 @@ import { VOCODER_PAGE, VOICEBANK_PAGE, VOICEBANK_VERSION } from './catalog.ts';
 const WORKER_SCRIPT = fileURLToPath(new URL('./python/worker.py', import.meta.url));
 /** 告诉模型「在哪唱歌、怎么点歌」的环境提示词模板。 */
 const ENV_PROMPT_PATH = fileURLToPath(new URL('../prompts/env.md', import.meta.url));
-const VERSION = '0.2.3';
+const VERSION = '0.2.5';
 /** `singer_sing` 等这一句唱进声卡的上限：整句批式合成 0.5–11 秒，再加 RVC 最多 20 秒，留足余量。 */
 const SING_ALOUD_MAX_MS = 90_000;
 /** 换声库时最多等旧引擎把排队的句子唱完（超时也照样切，别把用户卡死）。 */
@@ -68,6 +68,35 @@ export interface SingerWorldOptions {
   createEngine?: (init: EngineInit) => SingerEngine;
   /** 建本机播放器；单测里注入假播放器用，不传就用系统播放器（独立子进程，不加载原生模块）。 */
   createPlayer?: (log: Logger) => WavPlayer;
+  /** 建共享运行时任务；单测注入假任务用。 */
+  createRuntime?: (init: RuntimeInit) => RuntimeInstall;
+  /** 建声库安装任务；单测注入假任务用。 */
+  createInstaller?: (init: InstallerInit) => SingerInstaller;
+  /** 建派生 venv 任务；单测注入假任务用。 */
+  createVenv?: (init: VenvInit) => SingerVenv;
+}
+
+/** 共享运行时任务的构造参数（单测注入假任务时用）。 */
+export interface RuntimeInit {
+  root: string;
+  tier: 'cpu';
+  log?: Logger;
+}
+
+/** 声库安装任务的构造参数（单测注入假任务时用）。 */
+export interface InstallerInit {
+  dataDir: string;
+  voicebankDir: string;
+  pythonPath: () => string;
+  log?: Logger;
+}
+
+/** 派生 venv 任务的构造参数（单测注入假任务时用）。 */
+export interface VenvInit {
+  pythonPath: string;
+  basePython: string;
+  gpu: boolean;
+  log?: Logger;
 }
 
 export interface EngineInit {
@@ -196,6 +225,8 @@ export class SingerWorld implements World {
   private server: SingServerHandle | null = null;
   private starting: Promise<void> | null = null;
   private stopped = true;
+  /** 「一键安装」整条链在跑（运行时 → venv → 声库），期间禁止重入和重建 setup。 */
+  private setupRunning = false;
   /** 推理服务（引擎 + 本机接口）是否开着：面板可以手动停掉（还内存），World 仍挂载。 */
   private serviceOn = false;
   private launchDetail = '';
@@ -359,17 +390,31 @@ export class SingerWorld implements World {
     this.banksDir = paths.banksDir;
     this.activeBank = bankInfo(paths.voicebankDir);
     this.runtimesRoot = paths.runtimesRoot;
-    this.runtime = new RuntimeInstall({ root: paths.runtimesRoot, tier: 'cpu', log: this.log ?? undefined });
-    this.installer = new SingerInstaller(paths.dataDir, paths.voicebankDir, () => this.pythonPath, this.log ?? undefined);
-    this.venv = new SingerVenv({
-      pythonPath: paths.pythonPath,
-      basePython: paths.runtimeDir ? join(paths.runtimeDir, 'runtime', 'python.exe') : '',
-      // 显卡推理的两块依赖都在显卡档运行时里：GPU 版 onnxruntime 装进派生 venv，
-      // CUDA / cuDNN 从运行时的 torch/lib 借；CPU 档运行时没有这些，就不白装 215 MB。
-      gpu: this.opts.cfg.device !== 'cpu'
-        && (paths.runtimeTier === 'cuda' || runtimeHasCuda(paths.runtimeDir)),
-      log: this.log ?? undefined,
-    });
+    const log = this.log ?? undefined;
+    this.runtime = this.opts.createRuntime
+      ? this.opts.createRuntime({ root: paths.runtimesRoot, tier: 'cpu', log })
+      : new RuntimeInstall({ root: paths.runtimesRoot, tier: 'cpu', log });
+    const pythonPath = (): string => this.pythonPath;
+    this.installer = this.opts.createInstaller
+      ? this.opts.createInstaller({ dataDir: paths.dataDir, voicebankDir: paths.voicebankDir, pythonPath, log })
+      : new SingerInstaller(paths.dataDir, paths.voicebankDir, pythonPath, log);
+    this.venv = this.opts.createVenv
+      ? this.opts.createVenv({
+        pythonPath: paths.pythonPath,
+        basePython: paths.runtimeDir ? join(paths.runtimeDir, 'runtime', 'python.exe') : '',
+        gpu: this.opts.cfg.device !== 'cpu'
+          && (paths.runtimeTier === 'cuda' || runtimeHasCuda(paths.runtimeDir)),
+        log,
+      })
+      : new SingerVenv({
+        pythonPath: paths.pythonPath,
+        basePython: paths.runtimeDir ? join(paths.runtimeDir, 'runtime', 'python.exe') : '',
+        // 显卡推理的两块依赖都在显卡档运行时里：GPU 版 onnxruntime 装进派生 venv，
+        // CUDA / cuDNN 从运行时的 torch/lib 借；CPU 档运行时没有这些，就不白装 215 MB。
+        gpu: this.opts.cfg.device !== 'cpu'
+          && (paths.runtimeTier === 'cuda' || runtimeHasCuda(paths.runtimeDir)),
+        log,
+      });
     // 重启/重新解析路径后，上次换声库的失败记录一并清掉（下一句会重新试一次）。
     this.failedBank = null;
     this.bankSwitchError = '';
@@ -430,6 +475,7 @@ export class SingerWorld implements World {
     this.player = null;
     this.installer?.cancel();
     this.venv?.cancel();
+    this.runtime?.cancel();
     const server = this.server;
     this.server = null;
     await server?.close();
@@ -784,6 +830,17 @@ export class SingerWorld implements World {
     };
   }
 
+  /**
+   * 有安装任务在跑：运行时 / 派生 venv / 声库任一项 working，或整条「一键安装」链在跑。
+   * 面板据此禁用按钮，`restartEngine` 与 `startSetup` 据此拒绝重入。
+   */
+  private installing(): boolean {
+    return this.setupRunning
+      || this.installer?.status().phase === 'working'
+      || this.venv?.state().phase === 'working'
+      || this.runtime?.status().phase === 'working';
+  }
+
   /** 配置里的声库变了就地重建引擎；音色每句现读，不用重启。 */
   private async ensureBank(): Promise<void> {
     if (this.stopped || !this.serviceOn || !this.engine) return;
@@ -977,6 +1034,8 @@ export class SingerWorld implements World {
       ready: this.health().ready,
       /** 推理服务开着没有：面板据此切换「启动服务 / 停止服务」按钮。 */
       service: this.serviceOn,
+      /** 安装任务在跑（含换运行时后的整条安装链）：面板据此禁用安装/重启/卸载。 */
+      installing: this.installing(),
       device: st?.device ?? null,
       voicebank: st?.voicebank ?? null,
       sampleRate: st?.sampleRate ?? null,
@@ -1081,10 +1140,7 @@ export class SingerWorld implements World {
         ? (raw as { target: string }).target
         : '';
     if (!['voicebank', 'venv', 'tmp'].includes(target)) return { error: `未知的卸载目标：${target || '空'}` };
-    const busy = this.installer?.status().phase === 'working'
-      || this.venv?.state().phase === 'working'
-      || this.runtime?.status().phase === 'working';
-    if (busy) return { error: '有安装任务正在进行：先取消，再卸载' };
+    if (this.installing()) return { error: '有安装任务正在进行：先取消，再卸载' };
     // worker 占着 venv 里的 .pyd/.dll 与声库目录，先停掉再删。
     await this.engine?.stop();
     try {
@@ -1124,43 +1180,54 @@ export class SingerWorld implements World {
 
   /** 面板点「一键安装」：先停引擎，再（缺的话）下共享运行时、建派生 venv、补依赖、下声库，装完自动重拉引擎。 */
   private startSetup(): void {
-    const installer = this.installer;
-    const venv = this.venv;
-    if (!installer || !venv) return;
-    if (venv.state().phase === 'working' || installer.status().phase === 'working') return;
+    if (this.installing() || !this.installer || !this.venv) return;
+    this.setupRunning = true;
     void (async () => {
-      // worker 在跑时会占住 venv 里的 .pyd/.dll，pip 覆盖不了这些文件；先停掉再装。
-      await this.engine?.stop();
-      if (this.stopped) return;
-      // 没用自备运行时、部署里也没有 gpt-sovits 运行时：自己下一份 CPU 档（约 1 GB），
-      // 布局和 gpt-sovits 装的一模一样，三个插件共用同一份，谁先装都一样。
-      const runtime = this.runtime;
-      if (runtime && !runtime.ready() && !this.opts.cfg.runtimeDir.trim()) {
-        const ok = await runtime.ensure();
+      try {
+        // worker 在跑时会占住 venv 里的 .pyd/.dll，pip 覆盖不了这些文件；先停掉再装。
+        await this.engine?.stop();
         if (this.stopped) return;
-        if (!ok) {
-          this.log?.warn('共享运行时没装成，先不建派生 venv', { detail: runtime.status().detail });
+        // 没用自备运行时、部署里也没有 gpt-sovits 运行时：自己下一份 CPU 档（约 1 GB），
+        // 布局和 gpt-sovits 装的一模一样，三个插件共用同一份，谁先装都一样。
+        const runtime = this.runtime;
+        if (runtime && !runtime.ready() && !this.opts.cfg.runtimeDir.trim()) {
+          const ok = await runtime.ensure();
+          if (this.stopped) return;
+          if (!ok) {
+            this.log?.warn('共享运行时没装成，先不建派生 venv', { detail: runtime.status().detail });
+            return;
+          }
+          // 运行时到位了：重新解析 base 路径，venv / engine 都指向新目录。
+          // setup() 会换掉 installer / venv / runtime，所以下面必须用换过之后的 this.*：
+          // 面板、取消、停止看的都是 this.*，两边要指向同一个实例，否则下载会跑到旧实例上。
+          this.setup();
+        }
+        await this.venv?.ensure();
+        if (this.stopped) return;
+        if (this.venv?.state().phase !== 'ready') {
+          this.log?.warn('DiffSinger 依赖没装好，先不下载声库', { detail: this.venv?.state().detail });
           return;
         }
-        // 运行时到位了：重新解析 base 路径，venv / engine 都指向新目录。
-        this.setup();
+        const installer = this.installer;
+        if (!installer) return;
+        await installer.install();
+        if (this.stopped) return;
+        const state = installer.status();
+        this.log?.info('DiffSinger 声库安装结束', { phase: state.phase, detail: state.detail });
+        if (state.phase === 'ready' && this.serviceOn && !this.engine?.ready()) this.bootEngine();
+      } catch (err) {
+        this.log?.warn('一键安装中断', { err: err instanceof Error ? err.message : String(err) });
+      } finally {
+        this.setupRunning = false;
       }
-      await this.venv?.ensure();
-      if (this.stopped) return;
-      if (this.venv?.state().phase !== 'ready') {
-        this.log?.warn('DiffSinger 依赖没装好，先不下载声库', { detail: this.venv?.state().detail });
-        return;
-      }
-      await installer.install();
-      if (this.stopped) return;
-      const state = installer.status();
-      this.log?.info('DiffSinger 声库安装结束', { phase: state.phase, detail: state.detail });
-      if (state.phase === 'ready' && this.serviceOn && !this.engine?.ready()) this.bootEngine();
     })();
   }
 
   private async restartEngine(): Promise<void> {
     if (this.stopped) return;
+    // 安装任务在跑：这里会重建 setup()，把正在下载的 installer / venv 换成新实例，
+    // 下载就失去跟踪了；装完再重启（面板上的按钮也会随 installing 禁用）。
+    if (this.installing()) return;
     // 点「重启引擎」就等于要把服务开着：停了也能从这里启回来。
     this.serviceOn = true;
     this.serviceHeld = false;

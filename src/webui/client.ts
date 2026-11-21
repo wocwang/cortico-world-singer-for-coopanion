@@ -39,6 +39,8 @@ interface PanelState {
   ready: boolean;
   /** 推理服务（引擎 + 本机接口）开着没有；面板据此切换「启动服务 / 停止服务」。 */
   service: boolean;
+  /** 安装任务在跑（含换运行时后的整条安装链）：安装/取消/重启/卸载都按它来。 */
+  installing?: boolean;
   device: string | null;
   voicebank: string | null;
   sampleRate: number | null;
@@ -264,7 +266,7 @@ const servicePanel: WebUiPanel = {
       }
       // 声库
       const bankDone = s.voicebankReady && s.vocoderReady;
-      const busy = s.venv.phase === 'working' || s.install.phase === 'working' || s.runtime?.phase === 'working';
+      const busy = s.installing === true || s.venv.phase === 'working' || s.install.phase === 'working' || s.runtime?.phase === 'working';
       setPill(
         bankRow.pill,
         s.install.phase === 'working' ? `${t.working} ${s.install.total ? `${Math.round((s.install.done ?? 0) / s.install.total * 100)}%` : ''}` : t[phaseKey(bankDone ? 'ready' : s.install.phase)],

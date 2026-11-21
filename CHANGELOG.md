@@ -1,5 +1,26 @@
 # 更新记录
 
+## 0.2.5（2026-11-21）国内下载源实测：共享运行时的 GitHub 包也走镜像
+
+- 共享运行时原来只有 ModelScope + 官方 GitHub；官方直连在国内常打不开，ModelScope 一失败就装不上。
+  现在 GitHub 包也过 ghfast / ghproxy.net / gh-proxy：国内顺序 ModelScope → ghfast → ghproxy.net →
+  gh-proxy → 官方，设了代理时官方最前。
+- 实测（每个源拉 1 MB，国内宽带）：ModelScope 约 1.4 MB/s、ghfast 约 0.3 MB/s、gh-proxy 约 0.2 MB/s、
+  ghproxy.net 约 0.18 MB/s；官方 GitHub 直连在 Node 里证书校验失败。绮萱包的 ghfast 仍稳定 403，
+  声码器正常；阿里云 PyPI 镜像确认有 `diffsinger-utau 0.3.8` 与 `onnxruntime-gpu 1.22.0`。
+- 验证：`tsc --noEmit`、`vitest run` 130 个用例全绿（新增 2 个运行时来源顺序用例）。
+
+## 0.2.4（2026-11-21）修复安装期间换实例：下载脱离面板跟踪
+
+- 修：首次安装时共享运行时装好后，`setup()` 会重建 installer / venv，但「一键安装」链还持有旧 installer；
+  声库下载跑在旧实例上，面板看到的却是新实例（显示未安装、没有进度条、安装按钮可再点、取消/停用打不到旧下载）。
+  现在 `setup()` 之后重新取当前 installer；安装期间 `startSetup()` 与 `restartEngine()` 都拒绝重入，
+  面板新增 `installing`，整条安装链期间安装 / 取消 / 重启 / 卸载按钮都按它处理。
+- 修：取消与停用插件会同时取消共享运行时、派生 venv、声库三件事里正在跑的任务。
+- 修：`.partial` 删不掉（EPERM，例如被另一个下载占着）不再中断来源回退：删失败就继续换源，
+  校验失败后强制从 0 重下，避免在坏数据上续传。
+- 验证：`tsc --noEmit`、`vitest run` 128 个用例全绿（新增 2 个安装实例归属用例）。
+
 ## 0.2.3（2026-11-20）伴奏对齐：裁掉 compose 的 0.3 秒前导
 
 - 修：compose 渲染的 wav 在第 1 小节前留了 0.3 秒静音（`arrange.ts` 的 `LEAD_IN`），而干声从第 0 个采样点

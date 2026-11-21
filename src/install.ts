@@ -80,7 +80,9 @@ async function fetchTo(url: string, dest: string, offset: number, signal: AbortS
   if (res.status === 416 && offset > 0) return; // 已经下到头，交给调用方校验
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
   const append = offset > 0 && res.status === 206;
-  if (!append && offset > 0) rmSync(dest, { force: true });
+  // 服务器忽略了 Range：删掉旧片段重下。删不掉（被占用 / 权限）也不影响——
+  // 下面以 offset 0 打开写入流会截断文件。
+  if (!append && offset > 0) dropPartial(dest);
   let received = offset;
   const counter = new Transform({
     transform(chunk: Buffer, _enc, done) { received += chunk.length; done(null, chunk); },
@@ -112,6 +114,11 @@ async function fetchTo(url: string, dest: string, offset: number, signal: AbortS
   }
 }
 
+/** 删掉一个半成品；删不掉（被占用 / 权限）只记在心里，换源时用写入截断覆盖。 */
+function dropPartial(path: string): void {
+  try { rmSync(path, { force: true }); } catch { /* 下一个来源以 offset 0 打开会截断 */ }
+}
+
 /** 按来源顺序下完一个文件；网络中断/速度过慢保留 `.partial` 供下一个来源续传，校验失败则丢弃重来。 */
 async function downloadFile(dir: string, file: PinnedFile, signal: AbortSignal): Promise<void> {
   const dest = join(dir, file.path);
@@ -119,10 +126,12 @@ async function downloadFile(dir: string, file: PinnedFile, signal: AbortSignal):
   if (hasFile(dir, file)) return;
   mkdirSync(dirname(dest), { recursive: true });
   const errors: string[] = [];
+  // 校验失败后即使 `.partial` 删不掉，也不能让下一个来源在坏数据上续传：强制从头写。
+  let discard = false;
   for (const [index, url] of file.sources.entries()) {
     if (signal.aborted) throw new Error('已取消');
-    let offset = sizeOf(partial);
-    if (offset > file.bytes) { rmSync(partial, { force: true }); offset = 0; }
+    let offset = discard ? 0 : sizeOf(partial);
+    if (offset > file.bytes) { dropPartial(partial); offset = 0; discard = true; }
     try {
       // 最后一个来源不按速度放弃：再慢也比彻底装不上强。
       await fetchTo(url, partial, offset, signal, index < file.sources.length - 1);
@@ -133,7 +142,7 @@ async function downloadFile(dir: string, file: PinnedFile, signal: AbortSignal):
       return;
     } catch (err) {
       if (signal.aborted) throw err;
-      if (err instanceof VerifyError) rmSync(partial, { force: true });
+      if (err instanceof VerifyError) { discard = true; dropPartial(partial); }
       errors.push(`${new URL(url).host}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }

@@ -22,6 +22,23 @@ export const UPSTREAM_COMMIT = 'e91506f1fba265e1841617c3042a1573206a7351';
 const MS_OWN = 'https://www.modelscope.cn/models/Phantivia/gpt-sovits-for-coopanion/resolve/master';
 const GH_OWN = `https://github.com/Phantivia/cortico-world-gpt-sovits-for-coopanion/releases/download/runtime-${RUNTIME_VERSION}`;
 const CPU_FILE = `gpt-sovits-${RUNTIME_VERSION}-win-x64-cpu.zip`;
+const GH_FILE = `${GH_OWN}/${CPU_FILE}`;
+
+/** GitHub 在国内直连常常打不开；运行时的 GitHub 包也过一遍镜像。 */
+const ghfast = (url: string): string => `https://ghfast.top/${url}`;
+const ghProxy = (url: string): string => `https://gh-proxy.com/${url}`;
+const ghproxyNet = (url: string): string => `https://ghproxy.net/${url}`;
+
+const hasProxyEnv = (): boolean =>
+  ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']
+    .some((name) => Boolean(process.env[name]));
+
+/** 运行时来源：国内默认 ModelScope 优先，再用镜像兜底；设了代理时官方 GitHub 最前。 */
+export function runtimeSources(): string[] {
+  const ms = `${MS_OWN}/runtime/${CPU_FILE}`;
+  const mirrors = [ghfast(GH_FILE), ghproxyNet(GH_FILE), ghProxy(GH_FILE)];
+  return hasProxyEnv() ? [GH_FILE, ms, ...mirrors] : [ms, ...mirrors, GH_FILE];
+}
 
 /** 一个运行时包：整包大小、SHA-256 与按顺序尝试的来源。 */
 export interface RuntimeAsset {
@@ -35,7 +52,7 @@ export const RUNTIME_ASSET: RuntimeAsset = {
   file: CPU_FILE,
   bytes: 1036310624,
   sha256: '9ce348074e941388544b4db072ee0b9cfc50c9bd420e61f13ee9364fe90152e1',
-  sources: [`${MS_OWN}/runtime/${CPU_FILE}`, `${GH_OWN}/${CPU_FILE}`],
+  sources: runtimeSources(),
 };
 
 export type RuntimePhase = 'absent' | 'working' | 'ready' | 'error';
